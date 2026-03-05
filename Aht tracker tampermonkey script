@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         AHT Tracker & Timer (SEPO - Paragon) - All Marketplaces
+// @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
 // @version      2.7
 // @description  Tracks AHT per case with weighted average, DAG achievement, Excel export - DRAGGABLE & RESIZABLE - ALL MARKETPLACES & QUEUES
