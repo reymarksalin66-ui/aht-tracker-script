@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.7
-// @description  Tracks AHT per case with weighted average, DAG achievement, Excel export - DRAGGABLE & RESIZABLE - ALL MARKETPLACES & QUEUES
+// @version      2.10
+// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - ALL MARKETPLACES & QUEUES
 // @author       SEPO Team
 // @match        https://paragon.amazon.com/*
 // @match        https://paragon-na.amazon.com/*
@@ -26,7 +26,6 @@
     const STORAGE_KEY = 'aht_case_log_v2';
     const POSITION_STORAGE_KEY = 'aht_panel_position_v1';
     const SIZE_STORAGE_KEY = 'aht_panel_size_v1';
-    // ⭐ UPDATED: Regex pattern for ALL email queues across ALL marketplace TLDs
     const EMAIL_QUEUE_PATTERN = /(claims-atoz-inquiries-sesu|trms-pi-claims-cs-escalation-claims|claims-asor-inquiries-sss)@amazon\.[a-z.]+/i;
 
     // ─── STATE ────────────────────────────────────────────────────────────────
@@ -101,33 +100,67 @@
         return parseFloat((seconds / 60).toFixed(2));
     }
 
-    // ─── DAG ACHIEVEMENT ──────────────────────────────────────────────────────
+    // ─── DAG ACHIEVEMENT (Individual Case) ─────────────────────────────────────
     function calcDAG(actualSeconds, caseType) {
         if (actualSeconds === 0) return null;
         return ((AHT_GOALS[caseType] / actualSeconds) * 100).toFixed(1);
     }
 
-    // ─── WEIGHTED STATS ───────────────────────────────────────────────────────
+    // ─── WEIGHTED STATS (CASE-COUNT WEIGHTED WITH WEIGHTED GOAL) ───────────────
+    // ⭐ UPDATED: Calculates Weighted DAG = (Weighted Goal AHT / Weighted Achieved AHT) × 100
     function calcWeightedStats(log) {
         if (log.length === 0) return null;
-        let totalActual = 0, totalGoal = 0;
+
         let emailCount = 0, nonEmailCount = 0;
         let emailTotal = 0, nonEmailTotal = 0;
+
         for (const entry of log) {
-            const goal = AHT_GOALS[entry.caseType] || AHT_GOALS.nonemail;
-            totalActual += entry.duration;
-            totalGoal   += goal;
-            if (entry.caseType === 'email') { emailCount++; emailTotal += entry.duration; }
-            else { nonEmailCount++; nonEmailTotal += entry.duration; }
+            if (entry.caseType === 'email') {
+                emailCount++;
+                emailTotal += entry.duration;
+            } else {
+                nonEmailCount++;
+                nonEmailTotal += entry.duration;
+            }
         }
+
+        const totalCases = emailCount + nonEmailCount;
+        const emailWeight = emailCount / totalCases;
+        const nonEmailWeight = nonEmailCount / totalCases;
+
+        // Individual metrics per category
+        const avgEmailAHT = emailCount > 0 ? emailTotal / emailCount : 0;
+        const avgNonEmailAHT = nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : 0;
+        const emailDAG = emailCount > 0 ? ((AHT_GOALS.email / avgEmailAHT) * 100).toFixed(1) : null;
+        const nonEmailDAG = nonEmailCount > 0 ? ((AHT_GOALS.nonemail / avgNonEmailAHT) * 100).toFixed(1) : null;
+
+        // ⭐ WEIGHTED GOAL AHT
+        const weightedGoalAHT = (AHT_GOALS.email * emailWeight) + (AHT_GOALS.nonemail * nonEmailWeight);
+
+        // ⭐ WEIGHTED ACHIEVED AHT
+        const weightedAchievedAHT = (avgEmailAHT * emailWeight) + (avgNonEmailAHT * nonEmailWeight);
+
+        // ⭐ WEIGHTED DAG = (Weighted Goal / Weighted Achieved) × 100
+        const weightedDAG = weightedAchievedAHT > 0
+            ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1)
+            : null;
+
+        // ⭐ TOTAL GOALS AND ACHIEVED (by case count)
+        const totalGoalAHT = (AHT_GOALS.email * emailCount) + (AHT_GOALS.nonemail * nonEmailCount);
+        const totalAchievedAHT = emailTotal + nonEmailTotal;
+
         return {
-            weightedDAG:  ((totalGoal / totalActual) * 100).toFixed(1),
-            totalCases:   log.length,
-            emailCount,   nonEmailCount,
-            avgEmail:     emailCount    > 0 ? emailTotal    / emailCount    : null,
-            avgNonEmail:  nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : null,
-            emailDAG:     emailCount    > 0 ? ((AHT_GOALS.email    * emailCount    / emailTotal)    * 100).toFixed(1) : null,
-            nonEmailDAG:  nonEmailCount > 0 ? ((AHT_GOALS.nonemail * nonEmailCount / nonEmailTotal) * 100).toFixed(1) : null
+            weightedDAG,
+            weightedGoalAHT,
+            weightedAchievedAHT,
+            totalGoalAHT,
+            totalAchievedAHT,
+            totalCases,
+            emailCount, nonEmailCount,
+            avgEmail: avgEmailAHT,
+            avgNonEmail: avgNonEmailAHT,
+            emailDAG,
+            nonEmailDAG
         };
     }
 
@@ -163,29 +196,37 @@
 
         // Sheet 2: Summary
         const summaryRows = [
-            { 'Metric': 'Export Date',           'Value': new Date().toLocaleString() },
-            { 'Metric': '',                       'Value': '' },
-            { 'Metric': '── OVERALL ──',          'Value': '' },
-            { 'Metric': 'Total Cases',            'Value': stats.totalCases },
-            { 'Metric': 'Weighted DAG %',         'Value': parseFloat(stats.weightedDAG) },
-            { 'Metric': 'Weighted DAG Status',    'Value': parseFloat(stats.weightedDAG) >= 100 ? 'Achieved' : 'Below Goal' },
-            { 'Metric': '',                       'Value': '' },
-            { 'Metric': '── EMAIL CASES ──',      'Value': '' },
-            { 'Metric': 'Email Case Count',       'Value': stats.emailCount },
-            { 'Metric': 'Email Goal (min)',        'Value': 4.5 },
-            { 'Metric': 'Avg Email AHT (min)',     'Value': stats.avgEmail    !== null ? secondsToMinutes(stats.avgEmail)    : 'N/A' },
-            { 'Metric': 'Email DAG %',             'Value': stats.emailDAG    !== null ? parseFloat(stats.emailDAG)          : 'N/A' },
-            { 'Metric': 'Email DAG Status',        'Value': stats.emailDAG    !== null ? (parseFloat(stats.emailDAG)    >= 100 ? 'Achieved' : 'Below Goal') : 'N/A' },
-            { 'Metric': '',                       'Value': '' },
-            { 'Metric': '── NON-EMAIL CASES ──',  'Value': '' },
-            { 'Metric': 'Non-Email Case Count',   'Value': stats.nonEmailCount },
-            { 'Metric': 'Non-Email Goal (min)',    'Value': 8.0 },
-            { 'Metric': 'Avg Non-Email AHT (min)', 'Value': stats.avgNonEmail !== null ? secondsToMinutes(stats.avgNonEmail) : 'N/A' },
-            { 'Metric': 'Non-Email DAG %',         'Value': stats.nonEmailDAG !== null ? parseFloat(stats.nonEmailDAG)       : 'N/A' },
-            { 'Metric': 'Non-Email DAG Status',    'Value': stats.nonEmailDAG !== null ? (parseFloat(stats.nonEmailDAG) >= 100 ? 'Achieved' : 'Below Goal') : 'N/A' }
+            { 'Metric': 'Export Date',                         'Value': new Date().toLocaleString() },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── OVERALL (CASE-COUNT WEIGHTED) ──', 'Value': '' },
+            { 'Metric': 'Total Cases',                         'Value': stats.totalCases },
+            { 'Metric': 'Email Cases',                         'Value': stats.emailCount },
+            { 'Metric': 'Non-Email Cases',                     'Value': stats.nonEmailCount },
+            { 'Metric': 'Email Weight %',                      'Value': stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': 'Non-Email Weight %',                  'Value': stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': 'Weighted Goal AHT (min)',             'Value': secondsToMinutes(stats.weightedGoalAHT) },
+            { 'Metric': 'Weighted Achieved AHT (min)',         'Value': secondsToMinutes(stats.weightedAchievedAHT) },
+            { 'Metric': 'Weighted DAG %',                      'Value': parseFloat(stats.weightedDAG) },
+            { 'Metric': 'Weighted DAG Status',                 'Value': parseFloat(stats.weightedDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': 'Total Goal AHT (by case count)',      'Value': secondsToMinutes(stats.totalGoalAHT) },
+            { 'Metric': 'Total Achieved AHT (by case count)',  'Value': secondsToMinutes(stats.totalAchievedAHT) },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── EMAIL CASES ──',                   'Value': '' },
+            { 'Metric': 'Email Goal (min)',                    'Value': 4.5 },
+            { 'Metric': 'Avg Email AHT (min)',                 'Value': stats.avgEmail    !== 0 ? secondsToMinutes(stats.avgEmail)    : 'N/A' },
+            { 'Metric': 'Email DAG %',                         'Value': stats.emailDAG    !== null ? parseFloat(stats.emailDAG)          : 'N/A' },
+            { 'Metric': 'Email DAG Status',                    'Value': stats.emailDAG    !== null ? (parseFloat(stats.emailDAG)    >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── NON-EMAIL CASES ──',               'Value': '' },
+            { 'Metric': 'Non-Email Goal (min)',                'Value': 8.0 },
+            { 'Metric': 'Avg Non-Email AHT (min)',             'Value': stats.avgNonEmail !== 0 ? secondsToMinutes(stats.avgNonEmail) : 'N/A' },
+            { 'Metric': 'Non-Email DAG %',                     'Value': stats.nonEmailDAG !== null ? parseFloat(stats.nonEmailDAG)       : 'N/A' },
+            { 'Metric': 'Non-Email DAG Status',                'Value': stats.nonEmailDAG !== null ? (parseFloat(stats.nonEmailDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' }
         ];
         const ws2 = XLSX.utils.json_to_sheet(summaryRows);
-        ws2['!cols'] = [{wch:26},{wch:20}];
+        ws2['!cols'] = [{wch:35},{wch:25}];
         XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
 
         XLSX.writeFile(wb, `AHT_Log_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -432,7 +473,7 @@
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">⚙️ MANUAL OVERRIDE</div>
                 <div style="color:#bbb;"><strong>If queue is NOT detected automatically:</strong></div>
                 <div style="color:#bbb;">• Click <strong>📧 Email</strong> button if handling an email case</div>
-                <div style="color:#bbb;">• Click <strong>📁 Non-Email</strong> button if handling a other case</div>
+                <div style="color:#bbb;">• Click <strong>📁 Non-Email</strong> button if handling another case</div>
                 <div style="color:#888;font-size:10px;margin-top:4px;">This will manually set the case type and adjust the AHT goal accordingly.</div>
             </div>
 
@@ -444,31 +485,35 @@
             </div>
 
             <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📈 UNDERSTANDING DAG</div>
-                <div style="color:#bbb;"><strong>DAG %</strong> = (Goal Time ÷ Actual Time) × 100</div>
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📈 UNDERSTANDING DAG (Case-Count Weighted)</div>
+                <div style="color:#bbb;"><strong>Formula:</strong> (Weighted Goal AHT ÷ Weighted Achieved AHT) × 100</div>
+                <div style="color:#bbb;"><strong>Weighted Goal AHT</strong> = (Email Goal × Email Weight) + (Non-Email Goal × Non-Email Weight)</div>
+                <div style="color:#bbb;"><strong>Weighted Achieved AHT</strong> = (Avg Email AHT × Email Weight) + (Avg Non-Email AHT × Non-Email Weight)</div>
+                <div style="color:#bbb;"><strong>Weight</strong> = Number of cases in category ÷ Total cases</div>
+                <div style="color:#bbb;"><strong>Example:</strong> 10 Email + 5 Non-Email = Email weight 67%, Non-Email weight 33%</div>
                 <div style="color:#2ecc71;margin-top:4px;"><strong>≥100%</strong> = Goal Achieved ✓</div>
                 <div style="color:#f39c12;"><strong>80-99%</strong> = Near Goal ⚠️</div>
                 <div style="color:#e74c3c;"><strong>&lt;80%</strong> = Below Goal ✗</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">Higher DAG % = Better performance</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">Each case type is weighted by COUNT, not time spent!</div>
             </div>
 
             <div style="margin-bottom:12px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 KEY FEATURES</div>
                 <div style="color:#bbb;"><strong>📋 View Log:</strong> See session summary & recent cases</div>
-                <div style="color:#bbb;"><strong>📥 Export:</strong> Download all cases to Excel</div>
+                <div style="color:#bbb;"><strong>📥 Export:</strong> Download all cases to Excel with calculations</div>
                 <div style="color:#bbb;"><strong>🗑 Clear:</strong> Erase all logged cases</div>
                 <div style="color:#bbb;"><strong>❓ Help:</strong> Display this guide</div>
             </div>
 
             <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">⏰ ALERTS</div>
-                <div style="color:#f39c12;"><strong>⚠️ 75% Mark:</strong> Warning notification</div>
-                <div style="color:#e74c3c;"><strong>🚨 Goal Exceeded:</strong> Critical alert</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">You'll see real-time warnings and status updates</div>
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">⏰ ALERTS & WARNINGS</div>
+                <div style="color:#f39c12;"><strong>⚠️ 75% Mark:</strong> Warning notification sent</div>
+                <div style="color:#e74c3c;"><strong>🚨 Goal Exceeded:</strong> Critical alert when time runs out</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">Real-time status updates and color-coded indicators</div>
             </div>
 
             <div style="background:#16213e;border-radius:6px;padding:8px;border-left:4px solid #2980b9;">
-                <div style="color:#2980b9;font-size:10px;"><strong>💡 TIP:</strong> Track each case individually for accurate AHT metrics. Weighted averages are calculated across all tracked cases.</div>
+                <div style="color:#2980b9;font-size:10px;"><strong>💡 TIP:</strong> Track each case individually for accurate AHT metrics. The overall weighted DAG considers equal weight to each case regardless of duration!</div>
             </div>
         `;
 
@@ -636,17 +681,29 @@
 
         logPanel.innerHTML = `
             <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 Session Summary</div>
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 Session Summary (Case-Count Weighted)</div>
                 <div style="color:#aaa;"><strong style="color:#fff;">Total Cases: ${stats.totalCases}</strong> (📧 ${stats.emailCount} | 📁 ${stats.nonEmailCount})</div>
-                ${stats.avgEmail    !== null ? `<div style="color:#aaa;">Avg Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgEmail))}</strong> | DAG: <span style="color:${dagColor(stats.emailDAG)}">${stats.emailDAG}%</span></div>` : ''}
-                ${stats.avgNonEmail !== null ? `<div style="color:#aaa;">Avg Non-Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgNonEmail))}</strong> | DAG: <span style="color:${dagColor(stats.nonEmailDAG)}">${stats.nonEmailDAG}%</span></div>` : ''}
-                <div style="color:#aaa;">Weighted DAG: <strong style="color:${parseFloat(stats.weightedDAG) >= 100 ? '#2ecc71' : '#f39c12'}">${stats.weightedDAG}%</strong></div>
+                <div style="color:#aaa;">📧 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | 📁 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong></div>
+                ${stats.avgEmail    !== 0 ? `<div style="color:#aaa;">Avg Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgEmail))}</strong> | DAG: <span style="color:${dagColor(stats.emailDAG)}">${stats.emailDAG}%</span></div>` : ''}
+                ${stats.avgNonEmail !== 0 ? `<div style="color:#aaa;">Avg Non-Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgNonEmail))}</strong> | DAG: <span style="color:${dagColor(stats.nonEmailDAG)}">${stats.nonEmailDAG}%</span></div>` : ''}
             </div>
+
+            <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 GOAL vs ACHIEVED (by Case Count)</div>
+                <div style="color:#aaa;">Total Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalGoalAHT))}</strong> (${stats.emailCount} × 4:30 + ${stats.nonEmailCount} × 8:00)</div>
+                <div style="color:#aaa;">Total Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalAchievedAHT))}</strong></div>
+                <div style="color:#aaa;margin-top:6px;padding-top:6px;border-top:1px solid #333;">Weighted Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedGoalAHT))}</strong></div>
+                <div style="color:#aaa;">Weighted Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedAchievedAHT))}</strong></div>
+                <div style="color:#aaa;margin-top:4px;">📊 Weighted DAG: <strong style="color:${parseFloat(stats.weightedDAG) >= 100 ? '#2ecc71' : '#f39c12'}">${stats.weightedDAG}%</strong></div>
+            </div>
+
             <div style="color:#aaa;font-size:10px;margin-bottom:4px;">Last 10 cases:</div>
             ${rows}
             <div style="color:#888;font-size:9px;margin-top:12px;padding-top:8px;border-top:1px solid #222;line-height:1.5;">
-                📌 <strong style="color:#00d4ff;">Summary Stats</strong> = All <strong>${stats.totalCases}</strong> logged cases<br>
-                📌 <strong style="color:#00d4ff;">Recent Cases</strong> = Last 10 only (for readability)
+                📌 <strong style="color:#00d4ff;">Goal by Count</strong> = Total goals based on number of cases<br>
+                📌 <strong style="color:#00d4ff;">Achieved by Count</strong> = Total actual time spent on all cases<br>
+                📌 <strong style="color:#00d4ff;">Weighted</strong> = Proportional based on case distribution<br>
+                📌 <strong style="color:#00d4ff;">DAG Formula</strong> = (Weighted Goal ÷ Weighted Achieved) × 100
             </div>
         `;
     }
