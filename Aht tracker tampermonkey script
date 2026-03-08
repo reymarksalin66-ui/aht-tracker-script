@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.10
-// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - ALL MARKETPLACES & QUEUES
+// @version      2.16
+// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - ALL MARKETPLACES & QUEUES - INCLUDES PHOTON FALLBACK
 // @author       SEPO Team
 // @match        https://paragon.amazon.com/*
 // @match        https://paragon-na.amazon.com/*
@@ -21,7 +21,8 @@
     // ─── CONFIG ───────────────────────────────────────────────────────────────
     const AHT_GOALS = {
         email:    4.5 * 60,   // 270 seconds
-        nonemail: 8.0 * 60    // 480 seconds
+        nonemail: 8.0 * 60,   // 480 seconds
+        photon:   8.0 * 60    // 480 seconds (Photon fallback)
     };
     const STORAGE_KEY = 'aht_case_log_v2';
     const POSITION_STORAGE_KEY = 'aht_panel_position_v1';
@@ -49,6 +50,24 @@
     let resizeStartY = 0;
     let resizeStartWidth = 0;
     let resizeStartHeight = 0;
+
+    // ─── ATOM ICON SVG (Outline Style) ────────────────────────────────────────
+    function getAtomSVG() {
+        return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="display:inline;margin-right:4px;vertical-align:text-bottom;">
+            <!-- Nucleus -->
+            <circle cx="12" cy="12" r="2" stroke="currentColor" fill="none"/>
+            <!-- Orbital 1 (horizontal) -->
+            <ellipse cx="12" cy="12" rx="6" ry="3" stroke="currentColor" fill="none"/>
+            <!-- Orbital 2 (vertical rotated) -->
+            <ellipse cx="12" cy="12" rx="3" ry="6" stroke="currentColor" fill="none" transform="rotate(60 12 12)"/>
+            <!-- Orbital 3 (vertical rotated) -->
+            <ellipse cx="12" cy="12" rx="3" ry="6" stroke="currentColor" fill="none" transform="rotate(120 12 12)"/>
+            <!-- Electrons on orbitals -->
+            <circle cx="18" cy="12" r="1.5" stroke="currentColor" fill="none"/>
+            <circle cx="9" cy="17.2" r="1.5" stroke="currentColor" fill="none"/>
+            <circle cx="15" cy="6.8" r="1.5" stroke="currentColor" fill="none"/>
+        </svg>`;
+    }
 
     // ─── DETECT CASE ID FROM URL ──────────────────────────────────────────────
     function detectCaseId() {
@@ -111,34 +130,40 @@
     function calcWeightedStats(log) {
         if (log.length === 0) return null;
 
-        let emailCount = 0, nonEmailCount = 0;
-        let emailTotal = 0, nonEmailTotal = 0;
+        let emailCount = 0, nonEmailCount = 0, photonCount = 0;
+        let emailTotal = 0, nonEmailTotal = 0, photonTotal = 0;
 
         for (const entry of log) {
             if (entry.caseType === 'email') {
                 emailCount++;
                 emailTotal += entry.duration;
+            } else if (entry.caseType === 'photon') {
+                photonCount++;
+                photonTotal += entry.duration;
             } else {
                 nonEmailCount++;
                 nonEmailTotal += entry.duration;
             }
         }
 
-        const totalCases = emailCount + nonEmailCount;
+        const totalCases = emailCount + nonEmailCount + photonCount;
         const emailWeight = emailCount / totalCases;
         const nonEmailWeight = nonEmailCount / totalCases;
+        const photonWeight = photonCount / totalCases;
 
         // Individual metrics per category
         const avgEmailAHT = emailCount > 0 ? emailTotal / emailCount : 0;
         const avgNonEmailAHT = nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : 0;
+        const avgPhotonAHT = photonCount > 0 ? photonTotal / photonCount : 0;
         const emailDAG = emailCount > 0 ? ((AHT_GOALS.email / avgEmailAHT) * 100).toFixed(1) : null;
         const nonEmailDAG = nonEmailCount > 0 ? ((AHT_GOALS.nonemail / avgNonEmailAHT) * 100).toFixed(1) : null;
+        const photonDAG = photonCount > 0 ? ((AHT_GOALS.photon / avgPhotonAHT) * 100).toFixed(1) : null;
 
         // ⭐ WEIGHTED GOAL AHT
-        const weightedGoalAHT = (AHT_GOALS.email * emailWeight) + (AHT_GOALS.nonemail * nonEmailWeight);
+        const weightedGoalAHT = (AHT_GOALS.email * emailWeight) + (AHT_GOALS.nonemail * nonEmailWeight) + (AHT_GOALS.photon * photonWeight);
 
         // ⭐ WEIGHTED ACHIEVED AHT
-        const weightedAchievedAHT = (avgEmailAHT * emailWeight) + (avgNonEmailAHT * nonEmailWeight);
+        const weightedAchievedAHT = (avgEmailAHT * emailWeight) + (avgNonEmailAHT * nonEmailWeight) + (avgPhotonAHT * photonWeight);
 
         // ⭐ WEIGHTED DAG = (Weighted Goal / Weighted Achieved) × 100
         const weightedDAG = weightedAchievedAHT > 0
@@ -146,8 +171,8 @@
             : null;
 
         // ⭐ TOTAL GOALS AND ACHIEVED (by case count)
-        const totalGoalAHT = (AHT_GOALS.email * emailCount) + (AHT_GOALS.nonemail * nonEmailCount);
-        const totalAchievedAHT = emailTotal + nonEmailTotal;
+        const totalGoalAHT = (AHT_GOALS.email * emailCount) + (AHT_GOALS.nonemail * nonEmailCount) + (AHT_GOALS.photon * photonCount);
+        const totalAchievedAHT = emailTotal + nonEmailTotal + photonTotal;
 
         return {
             weightedDAG,
@@ -156,11 +181,13 @@
             totalGoalAHT,
             totalAchievedAHT,
             totalCases,
-            emailCount, nonEmailCount,
+            emailCount, nonEmailCount, photonCount,
             avgEmail: avgEmailAHT,
             avgNonEmail: avgNonEmailAHT,
+            avgPhoton: avgPhotonAHT,
             emailDAG,
-            nonEmailDAG
+            nonEmailDAG,
+            photonDAG
         };
     }
 
@@ -176,7 +203,7 @@
         const caseRows = log.map((entry, idx) => ({
             '#':               idx + 1,
             'Case ID':         entry.caseId,
-            'Case Type':       entry.caseType === 'email' ? 'Email' : 'Non-Email',
+            'Case Type':       entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon Fallback' : 'Non-Email',
             'Queue Name':      entry.queueName || 'N/A',
             'Start Time':      entry.startTime  ? new Date(entry.startTime).toLocaleString()  : 'N/A',
             'End Time':        entry.timestamp  ? new Date(entry.timestamp).toLocaleString()  : 'N/A',
@@ -188,7 +215,7 @@
         }));
         const ws1 = XLSX.utils.json_to_sheet(caseRows);
         ws1['!cols'] = [
-            {wch:4},{wch:18},{wch:12},{wch:28},
+            {wch:4},{wch:18},{wch:16},{wch:28},
             {wch:22},{wch:22},{wch:12},{wch:14},
             {wch:14},{wch:10},{wch:14}
         ];
@@ -202,8 +229,10 @@
             { 'Metric': 'Total Cases',                         'Value': stats.totalCases },
             { 'Metric': 'Email Cases',                         'Value': stats.emailCount },
             { 'Metric': 'Non-Email Cases',                     'Value': stats.nonEmailCount },
+            { 'Metric': 'Photon Fallback Cases',               'Value': stats.photonCount },
             { 'Metric': 'Email Weight %',                      'Value': stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
             { 'Metric': 'Non-Email Weight %',                  'Value': stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': 'Photon Weight %',                     'Value': stats.totalCases > 0 ? ((stats.photonCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
             { 'Metric': '',                                    'Value': '' },
             { 'Metric': 'Weighted Goal AHT (min)',             'Value': secondsToMinutes(stats.weightedGoalAHT) },
             { 'Metric': 'Weighted Achieved AHT (min)',         'Value': secondsToMinutes(stats.weightedAchievedAHT) },
@@ -223,7 +252,13 @@
             { 'Metric': 'Non-Email Goal (min)',                'Value': 8.0 },
             { 'Metric': 'Avg Non-Email AHT (min)',             'Value': stats.avgNonEmail !== 0 ? secondsToMinutes(stats.avgNonEmail) : 'N/A' },
             { 'Metric': 'Non-Email DAG %',                     'Value': stats.nonEmailDAG !== null ? parseFloat(stats.nonEmailDAG)       : 'N/A' },
-            { 'Metric': 'Non-Email DAG Status',                'Value': stats.nonEmailDAG !== null ? (parseFloat(stats.nonEmailDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' }
+            { 'Metric': 'Non-Email DAG Status',                'Value': stats.nonEmailDAG !== null ? (parseFloat(stats.nonEmailDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── PHOTON FALLBACK CASES ──',         'Value': '' },
+            { 'Metric': 'Photon Goal (min)',                   'Value': 8.0 },
+            { 'Metric': 'Avg Photon AHT (min)',                'Value': stats.avgPhoton !== 0 ? secondsToMinutes(stats.avgPhoton) : 'N/A' },
+            { 'Metric': 'Photon DAG %',                        'Value': stats.photonDAG !== null ? parseFloat(stats.photonDAG)       : 'N/A' },
+            { 'Metric': 'Photon DAG Status',                   'Value': stats.photonDAG !== null ? (parseFloat(stats.photonDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' }
         ];
         const ws2 = XLSX.utils.json_to_sheet(summaryRows);
         ws2['!cols'] = [{wch:35},{wch:25}];
@@ -315,6 +350,7 @@
             <div style="display:flex;gap:6px;justify-content:center;margin-bottom:8px;">
                 <button id="aht-btn-override-email"    style="${btnStyle('#8e44ad')}">📧 Email</button>
                 <button id="aht-btn-override-nonemail" style="${btnStyle('#2c3e50')}">📁 Non-Email</button>
+                <button id="aht-btn-override-photon"   style="${btnStyle('#c0392b')}">Photon</button>
             </div>
             <div style="display:flex;gap:6px;justify-content:center;margin-bottom:6px;">
                 <button id="aht-btn-log"   style="${btnStyle('#2980b9')}">📋 View Log</button>
@@ -331,6 +367,28 @@
         `;
 
         document.body.appendChild(panel);
+
+        // Add SVG styling for atom icon
+        const style = document.createElement('style');
+        style.textContent = `
+            #aht-btn-override-photon svg {
+                stroke: currentColor;
+                transition: all 0.2s ease;
+            }
+            #aht-btn-override-photon:hover svg {
+                filter: brightness(1.2);
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Set atom SVG for photon button
+        setTimeout(() => {
+            const photonBtn = document.getElementById('aht-btn-override-photon');
+            if (photonBtn) {
+                photonBtn.innerHTML = getAtomSVG() + 'Photon';
+            }
+        }, 100);
+
         attachEvents();
         attachDragResize();
         refreshCaseType();
@@ -464,8 +522,9 @@
 
             <div style="margin-bottom:12px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 CASE TYPES</div>
-                <div style="color:#bbb;"><span style="background:#8e44ad;padding:2px 6px;border-radius:4px;font-size:10px;">Email</span> Goal: <strong>4:30</strong> for email queue cases</div>
-                <div style="color:#bbb;"><span style="background:#2980b9;padding:2px 6px;border-radius:4px;font-size:10px;">Non-Email</span> Goal: <strong>8:00</strong> for other cases</div>
+                <div style="color:#bbb;"><span style="background:#8e44ad;padding:2px 6px;border-radius:4px;font-size:10px;">📧 Email</span> Goal: <strong>4:30</strong> for email queue cases</div>
+                <div style="color:#bbb;"><span style="background:#2980b9;padding:2px 6px;border-radius:4px;font-size:10px;">📁 Non-Email</span> Goal: <strong>8:00</strong> for other cases</div>
+                <div style="color:#bbb;"><span style="background:#c0392b;padding:2px 6px;border-radius:4px;font-size:10px;">⚛ Photon</span> Goal: <strong>8:00</strong> for Photon fallback queue</div>
                 <div style="color:#888;font-size:10px;margin-top:4px;">Auto-detected based on queue name.</div>
             </div>
 
@@ -474,6 +533,7 @@
                 <div style="color:#bbb;"><strong>If queue is NOT detected automatically:</strong></div>
                 <div style="color:#bbb;">• Click <strong>📧 Email</strong> button if handling an email case</div>
                 <div style="color:#bbb;">• Click <strong>📁 Non-Email</strong> button if handling another case</div>
+                <div style="color:#bbb;">• Click <strong>⚛ Photon</strong> button if handling a Photon fallback case</div>
                 <div style="color:#888;font-size:10px;margin-top:4px;">This will manually set the case type and adjust the AHT goal accordingly.</div>
             </div>
 
@@ -487,10 +547,10 @@
             <div style="margin-bottom:12px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📈 UNDERSTANDING DAG (Case-Count Weighted)</div>
                 <div style="color:#bbb;"><strong>Formula:</strong> (Weighted Goal AHT ÷ Weighted Achieved AHT) × 100</div>
-                <div style="color:#bbb;"><strong>Weighted Goal AHT</strong> = (Email Goal × Email Weight) + (Non-Email Goal × Non-Email Weight)</div>
-                <div style="color:#bbb;"><strong>Weighted Achieved AHT</strong> = (Avg Email AHT × Email Weight) + (Avg Non-Email AHT × Non-Email Weight)</div>
+                <div style="color:#bbb;"><strong>Weighted Goal AHT</strong> = (Email Goal × Email Weight) + (Non-Email Goal × Non-Email Weight) + (Photon Goal × Photon Weight)</div>
+                <div style="color:#bbb;"><strong>Weighted Achieved AHT</strong> = (Avg Email AHT × Email Weight) + (Avg Non-Email AHT × Non-Email Weight) + (Avg Photon AHT × Photon Weight)</div>
                 <div style="color:#bbb;"><strong>Weight</strong> = Number of cases in category ÷ Total cases</div>
-                <div style="color:#bbb;"><strong>Example:</strong> 10 Email + 5 Non-Email = Email weight 67%, Non-Email weight 33%</div>
+                <div style="color:#bbb;"><strong>Example:</strong> 10 Email + 5 Non-Email + 3 Photon = Email 55%, Non-Email 27%, Photon 18%</div>
                 <div style="color:#2ecc71;margin-top:4px;"><strong>≥100%</strong> = Goal Achieved ✓</div>
                 <div style="color:#f39c12;"><strong>80-99%</strong> = Near Goal ⚠️</div>
                 <div style="color:#e74c3c;"><strong>&lt;80%</strong> = Below Goal ✗</div>
@@ -535,6 +595,10 @@
             badge.textContent = 'Email';
             badge.style.background = '#8e44ad';
             if (goalLabel) goalLabel.textContent = 'Goal: 4:30 (Email)';
+        } else if (currentCaseType === 'photon') {
+            badge.textContent = 'Photon Fallback';
+            badge.style.background = '#c0392b';
+            if (goalLabel) goalLabel.textContent = 'Goal: 8:00 (Photon)';
         } else {
             badge.textContent = 'Non-Email';
             badge.style.background = '#2980b9';
@@ -633,10 +697,11 @@
 
     // ─── NOTIFICATIONS ────────────────────────────────────────────────────────
     function triggerNotification(level) {
+        const typeLabel = currentCaseType === 'email' ? 'Email' : currentCaseType === 'photon' ? 'Photon Fallback' : 'Non-Email';
         const goalStr = currentCaseType === 'email' ? '4.5 min' : '8 min';
         const messages = {
-            warning:  { title: '⚠️ AHT Warning',  text: `Case ${currentCaseId} (${currentCaseType}): 75% of ${goalStr} goal reached.` },
-            critical: { title: '🚨 AHT Critical', text: `Case ${currentCaseId} (${currentCaseType}): Goal of ${goalStr} exceeded!` }
+            warning:  { title: '⚠️ AHT Warning',  text: `Case ${currentCaseId} (${typeLabel}): 75% of ${goalStr} goal reached.` },
+            critical: { title: '🚨 AHT Critical', text: `Case ${currentCaseId} (${typeLabel}): Goal of ${goalStr} exceeded!` }
         };
         GM_notification({ title: messages[level].title, text: messages[level].text, timeout: 5000 });
     }
@@ -667,30 +732,35 @@
         const stats    = calcWeightedStats(log);
         const dagColor = (dag) => { const v = parseFloat(dag); return v >= 100 ? '#2ecc71' : v >= 80 ? '#f39c12' : '#e74c3c'; };
 
-        const rows = log.slice(-10).reverse().map(entry => `
-            <div style="border-bottom:1px solid #222;padding:4px 0;">
-                <span style="font-weight:bold;">${entry.caseId}</span>
-                <span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${entry.caseType === 'email' ? '#8e44ad' : '#2980b9'};color:#fff;margin-left:4px;">
-                    ${entry.caseType === 'email' ? 'Email' : 'Non-Email'}
-                </span><br>
-                ⏱ ${entry.formatted} &nbsp;|&nbsp;
-                <span style="color:${dagColor(entry.dag)}">DAG: ${entry.dag}%</span> &nbsp;|&nbsp;
-                🕐 ${new Date(entry.timestamp).toLocaleTimeString()}
-            </div>
-        `).join('');
+        const rows = log.slice(-10).reverse().map(entry => {
+            const typeLabel = entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon' : 'Non-Email';
+            const typeBg = entry.caseType === 'email' ? '#8e44ad' : entry.caseType === 'photon' ? '#c0392b' : '#2980b9';
+            return `
+                <div style="border-bottom:1px solid #222;padding:4px 0;">
+                    <span style="font-weight:bold;">${entry.caseId}</span>
+                    <span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${typeBg};color:#fff;margin-left:4px;">
+                        ${typeLabel}
+                    </span><br>
+                    ⏱ ${entry.formatted} &nbsp;|&nbsp;
+                    <span style="color:${dagColor(entry.dag)}">DAG: ${entry.dag}%</span> &nbsp;|&nbsp;
+                    🕐 ${new Date(entry.timestamp).toLocaleTimeString()}
+                </div>
+            `;
+        }).join('');
 
         logPanel.innerHTML = `
             <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 Session Summary (Case-Count Weighted)</div>
-                <div style="color:#aaa;"><strong style="color:#fff;">Total Cases: ${stats.totalCases}</strong> (📧 ${stats.emailCount} | 📁 ${stats.nonEmailCount})</div>
-                <div style="color:#aaa;">📧 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | 📁 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong></div>
+                <div style="color:#aaa;"><strong style="color:#fff;">Total Cases: ${stats.totalCases}</strong> (📧 ${stats.emailCount} | 📁 ${stats.nonEmailCount} | ⚛ ${stats.photonCount})</div>
+                <div style="color:#aaa;">📧 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | 📁 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | ⚛ Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.photonCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong></div>
                 ${stats.avgEmail    !== 0 ? `<div style="color:#aaa;">Avg Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgEmail))}</strong> | DAG: <span style="color:${dagColor(stats.emailDAG)}">${stats.emailDAG}%</span></div>` : ''}
                 ${stats.avgNonEmail !== 0 ? `<div style="color:#aaa;">Avg Non-Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgNonEmail))}</strong> | DAG: <span style="color:${dagColor(stats.nonEmailDAG)}">${stats.nonEmailDAG}%</span></div>` : ''}
+                ${stats.avgPhoton !== 0 ? `<div style="color:#aaa;">Avg Photon: <strong style="color:#fff;">${formatTime(Math.round(stats.avgPhoton))}</strong> | DAG: <span style="color:${dagColor(stats.photonDAG)}">${stats.photonDAG}%</span></div>` : ''}
             </div>
 
             <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 GOAL vs ACHIEVED (by Case Count)</div>
-                <div style="color:#aaa;">Total Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalGoalAHT))}</strong> (${stats.emailCount} × 4:30 + ${stats.nonEmailCount} × 8:00)</div>
+                <div style="color:#aaa;">Total Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalGoalAHT))}</strong> (${stats.emailCount} × 4:30 + ${stats.nonEmailCount} × 8:00 + ${stats.photonCount} × 8:00)</div>
                 <div style="color:#aaa;">Total Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalAchievedAHT))}</strong></div>
                 <div style="color:#aaa;margin-top:6px;padding-top:6px;border-top:1px solid #333;">Weighted Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedGoalAHT))}</strong></div>
                 <div style="color:#aaa;">Weighted Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedAchievedAHT))}</strong></div>
@@ -728,6 +798,10 @@
         document.getElementById('aht-btn-override-nonemail').addEventListener('click', () => {
             currentCaseType = 'nonemail'; currentQueueName = '(manual override)';
             updateCaseTypeUI(); updateStatusMsg('📁 Set to Non-Email manually', '#2980b9');
+        });
+        document.getElementById('aht-btn-override-photon').addEventListener('click', () => {
+            currentCaseType = 'photon'; currentQueueName = '(manual override - Photon Fallback)';
+            updateCaseTypeUI(); updateStatusMsg('⚛ Set to Photon Fallback manually', '#c0392b');
         });
 
         document.getElementById('aht-btn-log').addEventListener('click', () => {
