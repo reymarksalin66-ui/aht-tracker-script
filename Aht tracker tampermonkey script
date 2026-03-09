@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.28
-// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - TIMER & PANEL PERSIST ON REFRESH
-// @author       SEPO Team
+// @version      2.0
+// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - TIMER & PANEL PERSIST ON REFRESH - ONE NOTIFICATION PER THRESHOLD
+// @author       sreymark
 // @match        https://paragon.amazon.com/*
 // @match        https://paragon-na.amazon.com/*
 // @match        https://paragon-eu.amazon.com/*
@@ -226,6 +226,10 @@
     let helpPanelOpen    = false;
     let panelCheckerInterval = null;
 
+    // ⭐ V2.29 NOTIFICATION STATE - ONE PER THRESHOLD PER SESSION
+    let warningNotificationSent = false;
+    let criticalNotificationSent = false;
+
     // ⭐ V2.28 DRAG/RESIZE STATE
     let isDragging = false;
     let dragOffsetX = 0;
@@ -236,8 +240,6 @@
     let resizeStartWidth = 0;
     let resizeStartHeight = 0;
     let eventsAttached = false;
-
-    let lastNotificationTime = 0;
 
     function detectCaseId() {
         const photonMatch = window.location.href.match(/entityId=([^&]+)/i);
@@ -449,7 +451,7 @@
         }
     }
 
-    // ⭐ NOTIFICATION FUNCTION
+    // ⭐ V2.29 NOTIFICATION FUNCTION
     function triggerNotification(level) {
         const goalStr = currentCaseType === 'email' ? '4.5 min' : '8 min';
         const messages = {
@@ -511,6 +513,16 @@
             </div>
 
             <div class="help-section">
+                <h3>🔔 Notifications (v2.29)</h3>
+                <p><strong>One-Time Alerts:</strong> Each timer session triggers:</p>
+                <ul>
+                    <li><strong>⚠️ Warning:</strong> Once when reaching 75% of goal</li>
+                    <li><strong>🚨 Critical:</strong> Once when exceeding goal</li>
+                </ul>
+                <p>Alerts reset when you stop the timer or start a new case.</p>
+            </div>
+
+            <div class="help-section">
                 <h3>📊 DAG Calculation</h3>
                 <p><strong>DAG = (Goal AHT ÷ Actual AHT) × 100%</strong></p>
                 <p>The tracker uses <strong>case-count weighted DAG</strong> and shows breakdown by category.</p>
@@ -563,7 +575,7 @@ Weighted DAG =
                     <li>Auto-detection picks Email/Non-Email from queue</li>
                     <li>Override buttons let you correct case type</li>
                     <li>Excel export includes DAG % for all cases</li>
-                    <li>v2.28 - Timer & Panel Persist on Refresh + Notifications</li>
+                    <li>v2.29 - One notification per threshold per timer session</li>
                 </ul>
             </div>
         `;
@@ -814,6 +826,7 @@ Weighted DAG =
         console.log('✅ All event listeners attached');
     }
 
+    // ⭐ V2.29 UPDATED: updateDisplay() with one-time notification state
     function updateDisplay() {
         const display = document.getElementById('aht-timer-display');
         const bar = document.getElementById('aht-status-bar');
@@ -835,25 +848,26 @@ Weighted DAG =
         }
 
         const warningAt = goal * 0.75;
-        const now = Date.now();
 
         if (elapsedSeconds >= goal) {
             display.style.color = '#e74c3c';
             bar.style.background = '#e74c3c';
             updateStatusMsg('🚨 AHT Critical!', '#e74c3c');
-            // ⭐ Send notification once when critical
-            if (now - lastNotificationTime > 5000) {
+            // ⭐ V2.29: Send critical notification ONCE per timer session
+            if (!criticalNotificationSent) {
                 triggerNotification('critical');
-                lastNotificationTime = now;
+                criticalNotificationSent = true;
+                console.log('🚨 Critical notification sent');
             }
         } else if (elapsedSeconds >= warningAt) {
             display.style.color = '#f39c12';
             bar.style.background = '#f39c12';
             updateStatusMsg('⚠️ Approaching goal', '#f39c12');
-            // ⭐ Send notification once when warning
-            if (now - lastNotificationTime > 5000) {
+            // ⭐ V2.29: Send warning notification ONCE per timer session
+            if (!warningNotificationSent) {
                 triggerNotification('warning');
-                lastNotificationTime = now;
+                warningNotificationSent = true;
+                console.log('⚠️ Warning notification sent');
             }
         } else {
             display.style.color = '#00d4ff';
@@ -895,20 +909,33 @@ Weighted DAG =
         if (x) x.disabled = !running;
     }
 
+    // ⭐ V2.29 UPDATED: startTimer() - Reset notification flags
     function startTimer() {
         if (isRunning) return;
         detectCaseType();
         isRunning = true;
         caseStartTimestamp = new Date().toISOString();
         startTime = Date.now() - (elapsedSeconds * 1000);
+
+        // ⭐ V2.29: Reset notification flags for new timer session
+        warningNotificationSent = false;
+        criticalNotificationSent = false;
+        console.log('🔄 Notification flags reset for new timer');
+
         startContinuousTimer();
         setButtonStates(true);
         updateStatusMsg('🟢 Tracking...', '#2ecc71');
     }
 
+    // ⭐ V2.29 UPDATED: stopTimer() - Reset notification flags
     function stopTimer() {
         clearInterval(timerInterval);
         isRunning = false;
+
+        // ⭐ V2.29: Reset notification flags when stopping
+        warningNotificationSent = false;
+        criticalNotificationSent = false;
+
         const dag = calcDAG(elapsedSeconds, currentCaseType);
         const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
         log.push({
@@ -1039,7 +1066,7 @@ Weighted DAG =
 
     // ⭐ V2.28: INITIALIZE WITH TIMER RESTORATION
     function init() {
-        console.log('🚀 AHT Tracker v2.28 initializing...');
+        console.log('🚀 AHT Tracker v2.29 initializing...');
 
         // Try to restore timer FIRST before creating panel
         const timerRestored = restoreTimerState();
@@ -1051,6 +1078,8 @@ Weighted DAG =
         // If timer was restored, start continuous timer
         if (timerRestored) {
             isRunning = true;
+            // ⭐ V2.29: Do NOT reset notification flags on restore
+            // This allows notifications to continue working if they haven't fired yet
             startContinuousTimer();
             setButtonStates(true);
             updateStatusMsg('🟢 Tracking (Resumed)...', '#2ecc71');
