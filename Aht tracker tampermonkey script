@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.17
+// @version      2.19
 // @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - ALL MARKETPLACES & QUEUES - INCLUDES PHOTON FALLBACK
 // @author       SEPO Team
 // @match        https://paragon.amazon.com/*
@@ -29,6 +29,7 @@
     const SIZE_STORAGE_KEY = 'aht_panel_size_v1';
     const EMAIL_QUEUE_PATTERN = /(claims-atoz-inquiries-sesu|trms-pi-claims-cs-escalation-claims|claims-asor-inquiries-sss)@amazon\.[a-z.]+/i;
     const PHOTON_QUEUE_PATTERN = /(trms_pi_ph_uw_otc_fallback_uow|photon.*fallback|fallback.*photon)/i;
+    const PHOTON_URL_PATTERN = /hz\/entity.*entityType=UnitOfWork/i;
 
     // ─── STATE ────────────────────────────────────────────────────────────────
     let timerInterval    = null;
@@ -72,16 +73,32 @@
 
     // ─── DETECT CASE ID FROM URL ──────────────────────────────────────────────
     function detectCaseId() {
+        // Check for caseId parameter (standard cases)
         const caseIdParam = new URLSearchParams(window.location.search).get('caseId');
         if (caseIdParam) return caseIdParam;
+
+        // Check for id parameter (standard cases)
         const idParam = new URLSearchParams(window.location.search).get('id');
         if (idParam) return idParam;
+
+        // ⭐ Check for entityId parameter (Photon fallback cases)
+        // Example: entityId=19373983071%3AUOW%2FalOYV9QRN0igui055o97Vw
+        // Extract just the numeric part: 19373983071
+        const entityIdParam = new URLSearchParams(window.location.search).get('entityId');
+        if (entityIdParam) {
+            // Extract the part before the colon (URL-encoded as %3A)
+            const entityIdMatch = entityIdParam.match(/^(\d+)/);
+            if (entityIdMatch) return entityIdMatch[1];
+        }
+
+        // Check for path-based case IDs
         const pathMatch = window.location.href.match(/\/(cases|investigation|view-case)\/([A-Z0-9\-]+)/i);
         if (pathMatch) return pathMatch[2];
+
         return 'UNKNOWN-' + Date.now();
     }
 
-    // ─── DETECT CASE TYPE FROM QUEUE NAME ────────────────────────────────────
+    // ─── DETECT CASE TYPE FROM URL & QUEUE NAME ───────────────────────────────
     function detectCaseType() {
         const bodyText = document.body ? (document.body.innerText || '') : '';
         const queuePatterns = [
@@ -97,22 +114,36 @@
         currentQueueName = queueName;
 
         console.log('====== AHT TRACKER DEBUG ======');
+        console.log('Current URL:', window.location.href);
+        console.log('Photon URL Pattern:', PHOTON_URL_PATTERN);
+        console.log('URL Match:', PHOTON_URL_PATTERN.test(window.location.href));
         console.log('Queue Found:', currentQueueName);
         console.log('Email Pattern:', EMAIL_QUEUE_PATTERN);
-        console.log('Photon Pattern:', PHOTON_QUEUE_PATTERN);
+        console.log('Photon Queue Pattern:', PHOTON_QUEUE_PATTERN);
         console.log('Email Match:', EMAIL_QUEUE_PATTERN.test(currentQueueName));
-        console.log('Photon Match:', PHOTON_QUEUE_PATTERN.test(currentQueueName));
+        console.log('Photon Queue Match:', PHOTON_QUEUE_PATTERN.test(currentQueueName));
 
-        // ⭐ PRIORITY: Check Photon first, then Email, then default to Non-Email
-        if (PHOTON_QUEUE_PATTERN.test(currentQueueName)) {
+        // ⭐ PRIORITY: Check URL first for Photon, then Queue name for Email/Photon, then default to Non-Email
+        // 1️⃣ Check if URL matches Photon fallback pattern (hz/entity with UnitOfWork)
+        if (PHOTON_URL_PATTERN.test(window.location.href)) {
             currentCaseType = 'photon';
-        } else if (EMAIL_QUEUE_PATTERN.test(currentQueueName)) {
+            if (!currentQueueName) currentQueueName = '(Photon - auto-detected from URL)';
+        }
+        // 2️⃣ Check queue name for Photon
+        else if (PHOTON_QUEUE_PATTERN.test(currentQueueName)) {
+            currentCaseType = 'photon';
+        }
+        // 3️⃣ Check queue name for Email
+        else if (EMAIL_QUEUE_PATTERN.test(currentQueueName)) {
             currentCaseType = 'email';
-        } else {
+        }
+        // 4️⃣ Default to Non-Email
+        else {
             currentCaseType = 'nonemail';
         }
 
         console.log('Case Type Detected:', currentCaseType);
+        console.log('Queue Name Final:', currentQueueName);
         console.log('====== END DEBUG ======');
 
         return currentCaseType;
@@ -531,20 +562,20 @@
             </div>
 
             <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 CASE TYPES</div>
-                <div style="color:#bbb;"><span style="background:#8e44ad;padding:2px 6px;border-radius:4px;font-size:10px;">📧 Email</span> Goal: <strong>4:30</strong> for email queue cases</div>
-                <div style="color:#bbb;"><span style="background:#2980b9;padding:2px 6px;border-radius:4px;font-size:10px;">📁 Non-Email</span> Goal: <strong>8:00</strong> for other cases</div>
-                <div style="color:#bbb;"><span style="background:#c0392b;padding:2px 6px;border-radius:4px;font-size:10px;">⚛ Photon</span> Goal: <strong>8:00</strong> for Photon fallback queue (<code style="background:#000;padding:1px 3px;">trms_pi_ph_uw_otc_fallback_uow</code>)</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">Auto-detected based on queue name.</div>
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 CASE TYPES & AUTO-DETECTION</div>
+                <div style="color:#bbb;"><span style="background:#8e44ad;padding:2px 6px;border-radius:4px;font-size:10px;">📧 Email</span> Goal: <strong>4:30</strong> - Auto-detected from email queue names</div>
+                <div style="color:#bbb;"><span style="background:#2980b9;padding:2px 6px;border-radius:4px;font-size:10px;">📁 Non-Email</span> Goal: <strong>8:00</strong> - Default category for other cases</div>
+                <div style="color:#bbb;"><span style="background:#c0392b;padding:2px 6px;border-radius:4px;font-size:10px;">⚛ Photon</span> Goal: <strong>8:00</strong> - Auto-detected from URL (<code style="background:#000;padding:1px 3px;">hz/entity?...entityType=UnitOfWork</code>) OR queue name (<code style="background:#000;padding:1px 3px;">trms_pi_ph_uw_otc_fallback_uow</code>)</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;"><strong>Detection Priority:</strong> URL Pattern → Queue Name → Manual Override</div>
             </div>
 
             <div style="margin-bottom:12px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">⚙️ MANUAL OVERRIDE</div>
-                <div style="color:#bbb;"><strong>If queue is NOT detected automatically:</strong></div>
+                <div style="color:#bbb;"><strong>If auto-detection needs adjustment:</strong></div>
                 <div style="color:#bbb;">• Click <strong>📧 Email</strong> button if handling an email case</div>
                 <div style="color:#bbb;">• Click <strong>📁 Non-Email</strong> button if handling another case</div>
                 <div style="color:#bbb;">• Click <strong>⚛ Photon</strong> button if handling a Photon fallback case</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">This will manually set the case type and adjust the AHT goal accordingly.</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">Manual override will update the case type immediately.</div>
             </div>
 
             <div style="margin-bottom:12px;">
