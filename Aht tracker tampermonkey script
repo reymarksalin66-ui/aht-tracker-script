@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.19
+// @version      2.21
 // @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - ALL MARKETPLACES & QUEUES - INCLUDES PHOTON FALLBACK
 // @author       SEPO Team
 // @match        https://paragon.amazon.com/*
@@ -18,7 +18,52 @@
 (function () {
     'use strict';
 
-    // ─── CONFIG ───────────────────────────────────────────────────────────────
+    // ─── ULTRA AGGRESSIVE DUPLICATE PREVENTION ────────────────────────────────
+    // Generate unique ID for this script instance
+    const SCRIPT_INSTANCE_ID = 'AHT_TRACKER_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    const INSTANCE_STORAGE_KEY = 'aht_tracker_instance_id';
+
+    // Try to get stored instance ID
+    let storedInstanceId = sessionStorage.getItem(INSTANCE_STORAGE_KEY);
+
+    if (storedInstanceId && storedInstanceId !== SCRIPT_INSTANCE_ID) {
+        console.warn(`⚠️ DUPLICATE SCRIPT DETECTED!`);
+        console.warn(`📌 Current Instance: ${SCRIPT_INSTANCE_ID}`);
+        console.warn(`📌 Stored Instance: ${storedInstanceId}`);
+        console.warn(`🛑 EXITING TO PREVENT DUPLICATES - Please remove duplicate script from Tampermonkey!`);
+        console.warn(`\n📋 TO FIX:\n1. Go to Tampermonkey Dashboard\n2. Find "OTC GWF AHT Tracker"\n3. If you see MULTIPLE entries, delete all but ONE\n4. Refresh this page`);
+        return;
+    }
+
+    // Store this instance ID
+    sessionStorage.setItem(INSTANCE_STORAGE_KEY, SCRIPT_INSTANCE_ID);
+    console.log(`✅ AHT Tracker v2.21 - Instance: ${SCRIPT_INSTANCE_ID.substr(0, 20)}...`);
+
+    // ─── KILL ALL DUPLICATE PANELS IMMEDIATELY ────────────────────────────────
+    function nukeAllDuplicates() {
+        const allPanels = document.querySelectorAll('[id*="aht"]');
+        let duplicateCount = 0;
+
+        allPanels.forEach(panel => {
+            // Only keep the most recently created panel
+            if (panel.id.includes('aht-tracker-panel')) {
+                duplicateCount++;
+                if (duplicateCount > 1) {
+                    console.log(`🗑️ NUKING duplicate panel: ${panel.id}`);
+                    panel.remove();
+                }
+            }
+        });
+
+        if (duplicateCount > 1) {
+            console.warn(`⚠️ Removed ${duplicateCount - 1} duplicate panel(s)!`);
+        }
+    }
+
+    // Nuke duplicates immediately on load
+    nukeAllDuplicates();
+
+    // CONFIG ───────────────────────────────────────────────────────────────
     const AHT_GOALS = {
         email:    4.5 * 60,   // 270 seconds
         nonemail: 8.0 * 60,   // 480 seconds
@@ -31,7 +76,7 @@
     const PHOTON_QUEUE_PATTERN = /(trms_pi_ph_uw_otc_fallback_uow|photon.*fallback|fallback.*photon)/i;
     const PHOTON_URL_PATTERN = /hz\/entity.*entityType=UnitOfWork/i;
 
-    // ─── STATE ────────────────────────────────────────────────────────────────
+    // STATE ────────────────────────────────────────────────────────────────
     let timerInterval    = null;
     let startTime        = null;
     let elapsedSeconds   = 0;
@@ -42,8 +87,10 @@
     let caseStartTimestamp = null;
     let rebuildTimeout   = null;
     let helpPanelOpen    = false;
+    let mutationObserver = null;
+    let panelBuildAttempts = 0;
 
-    // ─── DRAGGING STATE ───────────────────────────────────────────────────────
+    // DRAGGING STATE ───────────────────────────────────────────────────────
     let isDragging = false;
     let dragOffsetX = 0;
     let dragOffsetY = 0;
@@ -53,52 +100,40 @@
     let resizeStartWidth = 0;
     let resizeStartHeight = 0;
 
-    // ─── ATOM ICON SVG (Outline Style) ────────────────────────────────────────
+    // ATOM ICON SVG ────────────────────────────────────────────────────────
     function getAtomSVG() {
         return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="display:inline;margin-right:4px;vertical-align:text-bottom;">
-            <!-- Nucleus -->
             <circle cx="12" cy="12" r="2" stroke="currentColor" fill="none"/>
-            <!-- Orbital 1 (horizontal) -->
             <ellipse cx="12" cy="12" rx="6" ry="3" stroke="currentColor" fill="none"/>
-            <!-- Orbital 2 (vertical rotated) -->
             <ellipse cx="12" cy="12" rx="3" ry="6" stroke="currentColor" fill="none" transform="rotate(60 12 12)"/>
-            <!-- Orbital 3 (vertical rotated) -->
             <ellipse cx="12" cy="12" rx="3" ry="6" stroke="currentColor" fill="none" transform="rotate(120 12 12)"/>
-            <!-- Electrons on orbitals -->
             <circle cx="18" cy="12" r="1.5" stroke="currentColor" fill="none"/>
             <circle cx="9" cy="17.2" r="1.5" stroke="currentColor" fill="none"/>
             <circle cx="15" cy="6.8" r="1.5" stroke="currentColor" fill="none"/>
         </svg>`;
     }
 
-    // ─── DETECT CASE ID FROM URL ──────────────────────────────────────────────
+    // DETECT CASE ID FROM URL ──────────────────────────────────────────────
     function detectCaseId() {
-        // Check for caseId parameter (standard cases)
         const caseIdParam = new URLSearchParams(window.location.search).get('caseId');
         if (caseIdParam) return caseIdParam;
 
-        // Check for id parameter (standard cases)
         const idParam = new URLSearchParams(window.location.search).get('id');
         if (idParam) return idParam;
 
-        // ⭐ Check for entityId parameter (Photon fallback cases)
-        // Example: entityId=19373983071%3AUOW%2FalOYV9QRN0igui055o97Vw
-        // Extract just the numeric part: 19373983071
         const entityIdParam = new URLSearchParams(window.location.search).get('entityId');
         if (entityIdParam) {
-            // Extract the part before the colon (URL-encoded as %3A)
             const entityIdMatch = entityIdParam.match(/^(\d+)/);
             if (entityIdMatch) return entityIdMatch[1];
         }
 
-        // Check for path-based case IDs
         const pathMatch = window.location.href.match(/\/(cases|investigation|view-case)\/([A-Z0-9\-]+)/i);
         if (pathMatch) return pathMatch[2];
 
         return 'UNKNOWN-' + Date.now();
     }
 
-    // ─── DETECT CASE TYPE FROM URL & QUEUE NAME ───────────────────────────────
+    // DETECT CASE TYPE FROM URL & QUEUE NAME ───────────────────────────────
     function detectCaseType() {
         const bodyText = document.body ? (document.body.innerText || '') : '';
         const queuePatterns = [
@@ -113,43 +148,24 @@
         }
         currentQueueName = queueName;
 
-        console.log('====== AHT TRACKER DEBUG ======');
-        console.log('Current URL:', window.location.href);
-        console.log('Photon URL Pattern:', PHOTON_URL_PATTERN);
-        console.log('URL Match:', PHOTON_URL_PATTERN.test(window.location.href));
-        console.log('Queue Found:', currentQueueName);
-        console.log('Email Pattern:', EMAIL_QUEUE_PATTERN);
-        console.log('Photon Queue Pattern:', PHOTON_QUEUE_PATTERN);
-        console.log('Email Match:', EMAIL_QUEUE_PATTERN.test(currentQueueName));
-        console.log('Photon Queue Match:', PHOTON_QUEUE_PATTERN.test(currentQueueName));
-
-        // ⭐ PRIORITY: Check URL first for Photon, then Queue name for Email/Photon, then default to Non-Email
-        // 1️⃣ Check if URL matches Photon fallback pattern (hz/entity with UnitOfWork)
         if (PHOTON_URL_PATTERN.test(window.location.href)) {
             currentCaseType = 'photon';
             if (!currentQueueName) currentQueueName = '(Photon - auto-detected from URL)';
         }
-        // 2️⃣ Check queue name for Photon
         else if (PHOTON_QUEUE_PATTERN.test(currentQueueName)) {
             currentCaseType = 'photon';
         }
-        // 3️⃣ Check queue name for Email
         else if (EMAIL_QUEUE_PATTERN.test(currentQueueName)) {
             currentCaseType = 'email';
         }
-        // 4️⃣ Default to Non-Email
         else {
             currentCaseType = 'nonemail';
         }
 
-        console.log('Case Type Detected:', currentCaseType);
-        console.log('Queue Name Final:', currentQueueName);
-        console.log('====== END DEBUG ======');
-
         return currentCaseType;
     }
 
-    // ─── FORMAT TIME ──────────────────────────────────────────────────────────
+    // FORMAT TIME ──────────────────────────────────────────────────────────
     function formatTime(seconds) {
         const m = Math.floor(seconds / 60).toString().padStart(2, '0');
         const s = (seconds % 60).toString().padStart(2, '0');
@@ -160,14 +176,13 @@
         return parseFloat((seconds / 60).toFixed(2));
     }
 
-    // ─── DAG ACHIEVEMENT (Individual Case) ─────────────────────────────────────
+    // DAG ACHIEVEMENT ──────────────────────────────────────────────────────
     function calcDAG(actualSeconds, caseType) {
         if (actualSeconds === 0) return null;
         return ((AHT_GOALS[caseType] / actualSeconds) * 100).toFixed(1);
     }
 
-    // ─── WEIGHTED STATS (CASE-COUNT WEIGHTED WITH WEIGHTED GOAL) ───────────────
-    // ⭐ UPDATED: Calculates Weighted DAG = (Weighted Goal AHT / Weighted Achieved AHT) × 100
+    // WEIGHTED STATS ───────────────────────────────────────────────────────
     function calcWeightedStats(log) {
         if (log.length === 0) return null;
 
@@ -192,7 +207,6 @@
         const nonEmailWeight = nonEmailCount / totalCases;
         const photonWeight = photonCount / totalCases;
 
-        // Individual metrics per category
         const avgEmailAHT = emailCount > 0 ? emailTotal / emailCount : 0;
         const avgNonEmailAHT = nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : 0;
         const avgPhotonAHT = photonCount > 0 ? photonTotal / photonCount : 0;
@@ -200,39 +214,24 @@
         const nonEmailDAG = nonEmailCount > 0 ? ((AHT_GOALS.nonemail / avgNonEmailAHT) * 100).toFixed(1) : null;
         const photonDAG = photonCount > 0 ? ((AHT_GOALS.photon / avgPhotonAHT) * 100).toFixed(1) : null;
 
-        // ⭐ WEIGHTED GOAL AHT
         const weightedGoalAHT = (AHT_GOALS.email * emailWeight) + (AHT_GOALS.nonemail * nonEmailWeight) + (AHT_GOALS.photon * photonWeight);
-
-        // ⭐ WEIGHTED ACHIEVED AHT
         const weightedAchievedAHT = (avgEmailAHT * emailWeight) + (avgNonEmailAHT * nonEmailWeight) + (avgPhotonAHT * photonWeight);
-
-        // ⭐ WEIGHTED DAG = (Weighted Goal / Weighted Achieved) × 100
         const weightedDAG = weightedAchievedAHT > 0
             ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1)
             : null;
 
-        // ⭐ TOTAL GOALS AND ACHIEVED (by case count)
         const totalGoalAHT = (AHT_GOALS.email * emailCount) + (AHT_GOALS.nonemail * nonEmailCount) + (AHT_GOALS.photon * photonCount);
         const totalAchievedAHT = emailTotal + nonEmailTotal + photonTotal;
 
         return {
-            weightedDAG,
-            weightedGoalAHT,
-            weightedAchievedAHT,
-            totalGoalAHT,
-            totalAchievedAHT,
-            totalCases,
+            weightedDAG, weightedGoalAHT, weightedAchievedAHT, totalGoalAHT, totalAchievedAHT, totalCases,
             emailCount, nonEmailCount, photonCount,
-            avgEmail: avgEmailAHT,
-            avgNonEmail: avgNonEmailAHT,
-            avgPhoton: avgPhotonAHT,
-            emailDAG,
-            nonEmailDAG,
-            photonDAG
+            avgEmail: avgEmailAHT, avgNonEmail: avgNonEmailAHT, avgPhoton: avgPhotonAHT,
+            emailDAG, nonEmailDAG, photonDAG
         };
     }
 
-    // ─── EXCEL EXPORT ─────────────────────────────────────────────────────────
+    // EXCEL EXPORT ─────────────────────────────────────────────────────────
     function exportToExcel() {
         const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
         if (log.length === 0) { alert('No cases logged yet. Nothing to export.'); return; }
@@ -240,66 +239,60 @@
         const stats = calcWeightedStats(log);
         const wb    = XLSX.utils.book_new();
 
-        // Sheet 1: Case Log
         const caseRows = log.map((entry, idx) => ({
-            '#':               idx + 1,
-            'Case ID':         entry.caseId,
-            'Case Type':       entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon Fallback' : 'Non-Email',
-            'Queue Name':      entry.queueName || 'N/A',
-            'Start Time':      entry.startTime  ? new Date(entry.startTime).toLocaleString()  : 'N/A',
-            'End Time':        entry.timestamp  ? new Date(entry.timestamp).toLocaleString()  : 'N/A',
-            'AHT (mm:ss)':     entry.formatted,
-            'AHT (minutes)':   secondsToMinutes(entry.duration),
-            'Goal (minutes)':  secondsToMinutes(entry.goal),
-            'DAG %':           parseFloat(entry.dag),
-            'DAG Status':      parseFloat(entry.dag) >= 100 ? 'Achieved' : parseFloat(entry.dag) >= 80 ? 'Near Goal' : 'Below Goal'
+            '#': idx + 1,
+            'Case ID': entry.caseId,
+            'Case Type': entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon Fallback' : 'Non-Email',
+            'Queue Name': entry.queueName || 'N/A',
+            'Start Time': entry.startTime  ? new Date(entry.startTime).toLocaleString()  : 'N/A',
+            'End Time': entry.timestamp  ? new Date(entry.timestamp).toLocaleString()  : 'N/A',
+            'AHT (mm:ss)': entry.formatted,
+            'AHT (minutes)': secondsToMinutes(entry.duration),
+            'Goal (minutes)': secondsToMinutes(entry.goal),
+            'DAG %': parseFloat(entry.dag),
+            'DAG Status': parseFloat(entry.dag) >= 100 ? 'Achieved' : parseFloat(entry.dag) >= 80 ? 'Near Goal' : 'Below Goal'
         }));
         const ws1 = XLSX.utils.json_to_sheet(caseRows);
-        ws1['!cols'] = [
-            {wch:4},{wch:18},{wch:16},{wch:28},
-            {wch:22},{wch:22},{wch:12},{wch:14},
-            {wch:14},{wch:10},{wch:14}
-        ];
+        ws1['!cols'] = [{wch:4},{wch:18},{wch:16},{wch:28},{wch:22},{wch:22},{wch:12},{wch:14},{wch:14},{wch:10},{wch:14}];
         XLSX.utils.book_append_sheet(wb, ws1, 'Case Log');
 
-        // Sheet 2: Summary
         const summaryRows = [
-            { 'Metric': 'Export Date',                         'Value': new Date().toLocaleString() },
-            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': 'Export Date', 'Value': new Date().toLocaleString() },
+            { 'Metric': '', 'Value': '' },
             { 'Metric': '── OVERALL (CASE-COUNT WEIGHTED) ──', 'Value': '' },
-            { 'Metric': 'Total Cases',                         'Value': stats.totalCases },
-            { 'Metric': 'Email Cases',                         'Value': stats.emailCount },
-            { 'Metric': 'Non-Email Cases',                     'Value': stats.nonEmailCount },
-            { 'Metric': 'Photon Fallback Cases',               'Value': stats.photonCount },
-            { 'Metric': 'Email Weight %',                      'Value': stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
-            { 'Metric': 'Non-Email Weight %',                  'Value': stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
-            { 'Metric': 'Photon Weight %',                     'Value': stats.totalCases > 0 ? ((stats.photonCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
-            { 'Metric': '',                                    'Value': '' },
-            { 'Metric': 'Weighted Goal AHT (min)',             'Value': secondsToMinutes(stats.weightedGoalAHT) },
-            { 'Metric': 'Weighted Achieved AHT (min)',         'Value': secondsToMinutes(stats.weightedAchievedAHT) },
-            { 'Metric': 'Weighted DAG %',                      'Value': parseFloat(stats.weightedDAG) },
-            { 'Metric': 'Weighted DAG Status',                 'Value': parseFloat(stats.weightedDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗' },
-            { 'Metric': '',                                    'Value': '' },
-            { 'Metric': 'Total Goal AHT (by case count)',      'Value': secondsToMinutes(stats.totalGoalAHT) },
-            { 'Metric': 'Total Achieved AHT (by case count)',  'Value': secondsToMinutes(stats.totalAchievedAHT) },
-            { 'Metric': '',                                    'Value': '' },
-            { 'Metric': '── EMAIL CASES ──',                   'Value': '' },
-            { 'Metric': 'Email Goal (min)',                    'Value': 4.5 },
-            { 'Metric': 'Avg Email AHT (min)',                 'Value': stats.avgEmail    !== 0 ? secondsToMinutes(stats.avgEmail)    : 'N/A' },
-            { 'Metric': 'Email DAG %',                         'Value': stats.emailDAG    !== null ? parseFloat(stats.emailDAG)          : 'N/A' },
-            { 'Metric': 'Email DAG Status',                    'Value': stats.emailDAG    !== null ? (parseFloat(stats.emailDAG)    >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
-            { 'Metric': '',                                    'Value': '' },
-            { 'Metric': '── NON-EMAIL CASES ──',               'Value': '' },
-            { 'Metric': 'Non-Email Goal (min)',                'Value': 8.0 },
-            { 'Metric': 'Avg Non-Email AHT (min)',             'Value': stats.avgNonEmail !== 0 ? secondsToMinutes(stats.avgNonEmail) : 'N/A' },
-            { 'Metric': 'Non-Email DAG %',                     'Value': stats.nonEmailDAG !== null ? parseFloat(stats.nonEmailDAG)       : 'N/A' },
-            { 'Metric': 'Non-Email DAG Status',                'Value': stats.nonEmailDAG !== null ? (parseFloat(stats.nonEmailDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
-            { 'Metric': '',                                    'Value': '' },
-            { 'Metric': '── PHOTON FALLBACK CASES ──',         'Value': '' },
-            { 'Metric': 'Photon Goal (min)',                   'Value': 8.0 },
-            { 'Metric': 'Avg Photon AHT (min)',                'Value': stats.avgPhoton !== 0 ? secondsToMinutes(stats.avgPhoton) : 'N/A' },
-            { 'Metric': 'Photon DAG %',                        'Value': stats.photonDAG !== null ? parseFloat(stats.photonDAG)       : 'N/A' },
-            { 'Metric': 'Photon DAG Status',                   'Value': stats.photonDAG !== null ? (parseFloat(stats.photonDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' }
+            { 'Metric': 'Total Cases', 'Value': stats.totalCases },
+            { 'Metric': 'Email Cases', 'Value': stats.emailCount },
+            { 'Metric': 'Non-Email Cases', 'Value': stats.nonEmailCount },
+            { 'Metric': 'Photon Fallback Cases', 'Value': stats.photonCount },
+            { 'Metric': 'Email Weight %', 'Value': stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': 'Non-Email Weight %', 'Value': stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': 'Photon Weight %', 'Value': stats.totalCases > 0 ? ((stats.photonCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': '', 'Value': '' },
+            { 'Metric': 'Weighted Goal AHT (min)', 'Value': secondsToMinutes(stats.weightedGoalAHT) },
+            { 'Metric': 'Weighted Achieved AHT (min)', 'Value': secondsToMinutes(stats.weightedAchievedAHT) },
+            { 'Metric': 'Weighted DAG %', 'Value': parseFloat(stats.weightedDAG) },
+            { 'Metric': 'Weighted DAG Status', 'Value': parseFloat(stats.weightedDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗' },
+            { 'Metric': '', 'Value': '' },
+            { 'Metric': 'Total Goal AHT (by case count)', 'Value': secondsToMinutes(stats.totalGoalAHT) },
+            { 'Metric': 'Total Achieved AHT (by case count)', 'Value': secondsToMinutes(stats.totalAchievedAHT) },
+            { 'Metric': '', 'Value': '' },
+            { 'Metric': '── EMAIL CASES ──', 'Value': '' },
+            { 'Metric': 'Email Goal (min)', 'Value': 4.5 },
+            { 'Metric': 'Avg Email AHT (min)', 'Value': stats.avgEmail    !== 0 ? secondsToMinutes(stats.avgEmail)    : 'N/A' },
+            { 'Metric': 'Email DAG %', 'Value': stats.emailDAG    !== null ? parseFloat(stats.emailDAG)          : 'N/A' },
+            { 'Metric': 'Email DAG Status', 'Value': stats.emailDAG    !== null ? (parseFloat(stats.emailDAG)    >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
+            { 'Metric': '', 'Value': '' },
+            { 'Metric': '── NON-EMAIL CASES ──', 'Value': '' },
+            { 'Metric': 'Non-Email Goal (min)', 'Value': 8.0 },
+            { 'Metric': 'Avg Non-Email AHT (min)', 'Value': stats.avgNonEmail !== 0 ? secondsToMinutes(stats.avgNonEmail) : 'N/A' },
+            { 'Metric': 'Non-Email DAG %', 'Value': stats.nonEmailDAG !== null ? parseFloat(stats.nonEmailDAG)       : 'N/A' },
+            { 'Metric': 'Non-Email DAG Status', 'Value': stats.nonEmailDAG !== null ? (parseFloat(stats.nonEmailDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
+            { 'Metric': '', 'Value': '' },
+            { 'Metric': '── PHOTON FALLBACK CASES ──', 'Value': '' },
+            { 'Metric': 'Photon Goal (min)', 'Value': 8.0 },
+            { 'Metric': 'Avg Photon AHT (min)', 'Value': stats.avgPhoton !== 0 ? secondsToMinutes(stats.avgPhoton) : 'N/A' },
+            { 'Metric': 'Photon DAG %', 'Value': stats.photonDAG !== null ? parseFloat(stats.photonDAG)       : 'N/A' },
+            { 'Metric': 'Photon DAG Status', 'Value': stats.photonDAG !== null ? (parseFloat(stats.photonDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' }
         ];
         const ws2 = XLSX.utils.json_to_sheet(summaryRows);
         ws2['!cols'] = [{wch:35},{wch:25}];
@@ -308,7 +301,7 @@
         XLSX.writeFile(wb, `AHT_Log_${new Date().toISOString().slice(0,10)}.xlsx`);
     }
 
-    // ─── BUTTON STYLE HELPER ──────────────────────────────────────────────────
+    // BUTTON STYLE HELPER ──────────────────────────────────────────────────
     function btnStyle(bg, large = false) {
         if (large) {
             return `background:${bg};color:#fff;border:none;border-radius:8px;padding:12px 14px;cursor:pointer;font-size:13px;font-weight:bold;flex:1;`;
@@ -316,14 +309,14 @@
         return `background:${bg};color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:bold;`;
     }
 
-    // ─── LOAD POSITION AND SIZE ───────────────────────────────────────────────
+    // LOAD POSITION AND SIZE ───────────────────────────────────────────────
     function loadPanelState() {
         const position = JSON.parse(GM_getValue(POSITION_STORAGE_KEY, '{"bottom":"20px","right":"20px"}'));
         const size = JSON.parse(GM_getValue(SIZE_STORAGE_KEY, '{"width":"260px","height":"auto"}'));
         return { position, size };
     }
 
-    // ─── SAVE POSITION AND SIZE ───────────────────────────────────────────────
+    // SAVE POSITION AND SIZE ───────────────────────────────────────────────
     function savePanelState(panel) {
         const rect = panel.getBoundingClientRect();
         const position = {
@@ -340,14 +333,23 @@
         GM_setValue(SIZE_STORAGE_KEY, JSON.stringify(size));
     }
 
-    // ─── BUILD UI PANEL ───────────────────────────────────────────────────────
+    // BUILD UI PANEL ───────────────────────────────────────────────────────
     function buildPanel() {
-        // Remove stale panel if detached from body
-        const existing = document.getElementById('aht-tracker-panel');
-        if (existing) {
-            if (document.body && document.body.contains(existing)) return; // already live
-            existing.remove();
+        // Kill all duplicates first
+        nukeAllDuplicates();
+
+        panelBuildAttempts++;
+        if (panelBuildAttempts > 3) {
+            console.error('❌ Failed to build panel after 3 attempts. Check for conflicting scripts!');
+            return;
         }
+
+        const existing = document.getElementById('aht-tracker-panel');
+        if (existing && document.body && document.body.contains(existing)) {
+            console.log('✅ Panel already exists.');
+            return;
+        }
+        if (existing) existing.remove();
         if (!document.body) return;
 
         const { position, size } = loadPanelState();
@@ -408,8 +410,8 @@
         `;
 
         document.body.appendChild(panel);
+        console.log('✅ Panel created successfully');
 
-        // Add SVG styling for atom icon
         const style = document.createElement('style');
         style.textContent = `
             #aht-btn-override-photon svg {
@@ -422,7 +424,6 @@
         `;
         document.head.appendChild(style);
 
-        // Set atom SVG for photon button
         setTimeout(() => {
             const photonBtn = document.getElementById('aht-btn-override-photon');
             if (photonBtn) {
@@ -435,7 +436,7 @@
         refreshCaseType();
     }
 
-    // ─── DRAG AND RESIZE HANDLERS ─────────────────────────────────────────────
+    // DRAG AND RESIZE HANDLERS ─────────────────────────────────────────────
     function attachDragResize() {
         const panel = document.getElementById('aht-tracker-panel');
         const header = document.getElementById('aht-panel-header');
@@ -443,7 +444,6 @@
 
         if (!panel || !header) return;
 
-        // ─── DRAG FUNCTIONALITY ───────────────────────────────────────────────
         header.addEventListener('mousedown', (e) => {
             isDragging = true;
             dragOffsetX = e.clientX - panel.getBoundingClientRect().left;
@@ -455,12 +455,9 @@
             if (isDragging) {
                 const newX = e.clientX - dragOffsetX;
                 const newY = e.clientY - dragOffsetY;
-
-                // Keep panel within viewport
                 const rect = panel.getBoundingClientRect();
                 const maxX = window.innerWidth - rect.width;
                 const maxY = window.innerHeight - rect.height;
-
                 panel.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
                 panel.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
                 panel.style.bottom = 'auto';
@@ -488,7 +485,6 @@
             }
         });
 
-        // ─── RESIZE FUNCTIONALITY ─────────────────────────────────────────────
         if (resizeHandle) {
             resizeHandle.addEventListener('mousedown', (e) => {
                 e.preventDefault();
@@ -502,7 +498,6 @@
             });
         }
 
-        // ─── TOUCH SUPPORT (Optional - for mobile/tablet) ──────────────────────
         header.addEventListener('touchstart', (e) => {
             if (e.touches.length !== 1) return;
             isDragging = true;
@@ -532,7 +527,7 @@
         });
     }
 
-    // ─── DISPLAY HELP INSTRUCTIONS ────────────────────────────────────────────
+    // DISPLAY HELP INSTRUCTIONS ────────────────────────────────────────────
     function displayHelpInstructions() {
         const helpPanel = document.getElementById('aht-help-panel');
         const helpBtn = document.getElementById('aht-btn-help');
@@ -565,7 +560,7 @@
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 CASE TYPES & AUTO-DETECTION</div>
                 <div style="color:#bbb;"><span style="background:#8e44ad;padding:2px 6px;border-radius:4px;font-size:10px;">📧 Email</span> Goal: <strong>4:30</strong> - Auto-detected from email queue names</div>
                 <div style="color:#bbb;"><span style="background:#2980b9;padding:2px 6px;border-radius:4px;font-size:10px;">📁 Non-Email</span> Goal: <strong>8:00</strong> - Default category for other cases</div>
-                <div style="color:#bbb;"><span style="background:#c0392b;padding:2px 6px;border-radius:4px;font-size:10px;">⚛ Photon</span> Goal: <strong>8:00</strong> - Auto-detected from URL (<code style="background:#000;padding:1px 3px;">hz/entity?...entityType=UnitOfWork</code>) OR queue name (<code style="background:#000;padding:1px 3px;">trms_pi_ph_uw_otc_fallback_uow</code>)</div>
+                <div style="color:#bbb;"><span style="background:#c0392b;padding:2px 6px;border-radius:4px;font-size:10px;">⚛ Photon</span> Goal: <strong>8:00</strong> - Auto-detected from URL or queue name</div>
                 <div style="color:#888;font-size:10px;margin-top:4px;"><strong>Detection Priority:</strong> URL Pattern → Queue Name → Manual Override</div>
             </div>
 
@@ -575,53 +570,23 @@
                 <div style="color:#bbb;">• Click <strong>📧 Email</strong> button if handling an email case</div>
                 <div style="color:#bbb;">• Click <strong>📁 Non-Email</strong> button if handling another case</div>
                 <div style="color:#bbb;">• Click <strong>⚛ Photon</strong> button if handling a Photon fallback case</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">Manual override will update the case type immediately.</div>
             </div>
 
             <div style="margin-bottom:12px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 MOVING & RESIZING</div>
-                <div style="color:#bbb;"><strong>💫 Drag:</strong> Click and drag the header bar to move the widget anywhere on screen</div>
-                <div style="color:#bbb;"><strong>📐 Resize:</strong> Click and drag the corner resize handle (bottom-right) to adjust size</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">Your position and size are saved automatically!</div>
-            </div>
-
-            <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📈 UNDERSTANDING DAG (Case-Count Weighted)</div>
-                <div style="color:#bbb;"><strong>Formula:</strong> (Weighted Goal AHT ÷ Weighted Achieved AHT) × 100</div>
-                <div style="color:#bbb;"><strong>Weighted Goal AHT</strong> = (Email Goal × Email Weight) + (Non-Email Goal × Non-Email Weight) + (Photon Goal × Photon Weight)</div>
-                <div style="color:#bbb;"><strong>Weighted Achieved AHT</strong> = (Avg Email AHT × Email Weight) + (Avg Non-Email AHT × Non-Email Weight) + (Avg Photon AHT × Photon Weight)</div>
-                <div style="color:#bbb;"><strong>Weight</strong> = Number of cases in category ÷ Total cases</div>
-                <div style="color:#bbb;"><strong>Example:</strong> 10 Email + 5 Non-Email + 3 Photon = Email 55%, Non-Email 27%, Photon 18%</div>
-                <div style="color:#2ecc71;margin-top:4px;"><strong>≥100%</strong> = Goal Achieved ✓</div>
-                <div style="color:#f39c12;"><strong>80-99%</strong> = Near Goal ⚠️</div>
-                <div style="color:#e74c3c;"><strong>&lt;80%</strong> = Below Goal ✗</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">Each case type is weighted by COUNT, not time spent!</div>
-            </div>
-
-            <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 KEY FEATURES</div>
-                <div style="color:#bbb;"><strong>📋 View Log:</strong> See session summary & recent cases</div>
-                <div style="color:#bbb;"><strong>📥 Export:</strong> Download all cases to Excel with calculations</div>
-                <div style="color:#bbb;"><strong>🗑 Clear:</strong> Erase all logged cases</div>
-                <div style="color:#bbb;"><strong>❓ Help:</strong> Display this guide</div>
-            </div>
-
-            <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">⏰ ALERTS & WARNINGS</div>
-                <div style="color:#f39c12;"><strong>⚠️ 75% Mark:</strong> Warning notification sent</div>
-                <div style="color:#e74c3c;"><strong>🚨 Goal Exceeded:</strong> Critical alert when time runs out</div>
-                <div style="color:#888;font-size:10px;margin-top:4px;">Real-time status updates and color-coded indicators</div>
+                <div style="color:#bbb;"><strong>💫 Drag:</strong> Click and drag the header bar to move</div>
+                <div style="color:#bbb;"><strong>📐 Resize:</strong> Click and drag the corner resize handle</div>
             </div>
 
             <div style="background:#16213e;border-radius:6px;padding:8px;border-left:4px solid #2980b9;">
-                <div style="color:#2980b9;font-size:10px;"><strong>💡 TIP:</strong> Track each case individually for accurate AHT metrics. The overall weighted DAG considers equal weight to each case regardless of duration!</div>
+                <div style="color:#2980b9;font-size:10px;"><strong>💡 TIP:</strong> Track each case individually for accurate AHT metrics!</div>
             </div>
         `;
 
         helpPanel.style.display = 'block';
     }
 
-    // ─── REFRESH CASE TYPE UI ─────────────────────────────────────────────────
+    // REFRESH CASE TYPE UI ─────────────────────────────────────────────────
     function refreshCaseType() {
         detectCaseType();
         updateCaseTypeUI();
@@ -648,7 +613,7 @@
         if (queueLabel) queueLabel.textContent = currentQueueName ? `Queue: ${currentQueueName}` : 'Queue: not detected';
     }
 
-    // ─── TIMER LOGIC ──────────────────────────────────────────────────────────
+    // TIMER LOGIC ──────────────────────────────────────────────────────────
     function startTimer() {
         if (isRunning) return;
         refreshCaseType();
@@ -692,7 +657,7 @@
         }, 3000);
     }
 
-    // ─── DISPLAY UPDATE ───────────────────────────────────────────────────────
+    // DISPLAY UPDATE ───────────────────────────────────────────────────────
     function updateDisplay() {
         const display    = document.getElementById('aht-timer-display');
         const bar        = document.getElementById('aht-status-bar');
@@ -736,7 +701,7 @@
         if (el) { el.textContent = msg; el.style.color = color; }
     }
 
-    // ─── NOTIFICATIONS ────────────────────────────────────────────────────────
+    // NOTIFICATIONS ────────────────────────────────────────────────────────
     function triggerNotification(level) {
         const typeLabel = currentCaseType === 'email' ? 'Email' : currentCaseType === 'photon' ? 'Photon Fallback' : 'Non-Email';
         const goalStr = currentCaseType === 'email' ? '4.5 min' : '8 min';
@@ -747,7 +712,7 @@
         GM_notification({ title: messages[level].title, text: messages[level].text, timeout: 5000 });
     }
 
-    // ─── LOGGING ──────────────────────────────────────────────────────────────
+    // LOGGING ──────────────────────────────────────────────────────────────
     function saveLog(dag) {
         const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
         log.push({
@@ -791,35 +756,15 @@
 
         logPanel.innerHTML = `
             <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 Session Summary (Case-Count Weighted)</div>
-                <div style="color:#aaa;"><strong style="color:#fff;">Total Cases: ${stats.totalCases}</strong> (📧 ${stats.emailCount} | 📁 ${stats.nonEmailCount} | ⚛ ${stats.photonCount})</div>
-                <div style="color:#aaa;">📧 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | 📁 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | ⚛ Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.photonCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong></div>
-                ${stats.avgEmail    !== 0 ? `<div style="color:#aaa;">Avg Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgEmail))}</strong> | DAG: <span style="color:${dagColor(stats.emailDAG)}">${stats.emailDAG}%</span></div>` : ''}
-                ${stats.avgNonEmail !== 0 ? `<div style="color:#aaa;">Avg Non-Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgNonEmail))}</strong> | DAG: <span style="color:${dagColor(stats.nonEmailDAG)}">${stats.nonEmailDAG}%</span></div>` : ''}
-                ${stats.avgPhoton !== 0 ? `<div style="color:#aaa;">Avg Photon: <strong style="color:#fff;">${formatTime(Math.round(stats.avgPhoton))}</strong> | DAG: <span style="color:${dagColor(stats.photonDAG)}">${stats.photonDAG}%</span></div>` : ''}
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 Session Summary</div>
+                <div style="color:#aaa;"><strong style="color:#fff;">Total: ${stats.totalCases}</strong> (📧${stats.emailCount}|📁${stats.nonEmailCount}|⚛${stats.photonCount})</div>
+                <div style="color:#aaa;">Weighted DAG: <strong style="color:${parseFloat(stats.weightedDAG) >= 100 ? '#2ecc71' : '#f39c12'}">${stats.weightedDAG}%</strong></div>
             </div>
-
-            <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
-                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 GOAL vs ACHIEVED (by Case Count)</div>
-                <div style="color:#aaa;">Total Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalGoalAHT))}</strong> (${stats.emailCount} × 4:30 + ${stats.nonEmailCount} × 8:00 + ${stats.photonCount} × 8:00)</div>
-                <div style="color:#aaa;">Total Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalAchievedAHT))}</strong></div>
-                <div style="color:#aaa;margin-top:6px;padding-top:6px;border-top:1px solid #333;">Weighted Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedGoalAHT))}</strong></div>
-                <div style="color:#aaa;">Weighted Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedAchievedAHT))}</strong></div>
-                <div style="color:#aaa;margin-top:4px;">📊 Weighted DAG: <strong style="color:${parseFloat(stats.weightedDAG) >= 100 ? '#2ecc71' : '#f39c12'}">${stats.weightedDAG}%</strong></div>
-            </div>
-
-            <div style="color:#aaa;font-size:10px;margin-bottom:4px;">Last 10 cases:</div>
             ${rows}
-            <div style="color:#888;font-size:9px;margin-top:12px;padding-top:8px;border-top:1px solid #222;line-height:1.5;">
-                📌 <strong style="color:#00d4ff;">Goal by Count</strong> = Total goals based on number of cases<br>
-                📌 <strong style="color:#00d4ff;">Achieved by Count</strong> = Total actual time spent on all cases<br>
-                📌 <strong style="color:#00d4ff;">Weighted</strong> = Proportional based on case distribution<br>
-                📌 <strong style="color:#00d4ff;">DAG Formula</strong> = (Weighted Goal ÷ Weighted Achieved) × 100
-            </div>
         `;
     }
 
-    // ─── BUTTON STATES ────────────────────────────────────────────────────────
+    // BUTTON STATES ────────────────────────────────────────────────────────
     function setButtonStates(running) {
         const s = document.getElementById('aht-btn-start');
         const x = document.getElementById('aht-btn-stop');
@@ -827,7 +772,7 @@
         if (x) x.disabled = !running;
     }
 
-    // ─── EVENT LISTENERS ──────────────────────────────────────────────────────
+    // EVENT LISTENERS ──────────────────────────────────────────────────────
     function attachEvents() {
         document.getElementById('aht-btn-start').addEventListener('click', startTimer);
         document.getElementById('aht-btn-stop').addEventListener('click', stopTimer);
@@ -848,7 +793,6 @@
         document.getElementById('aht-btn-log').addEventListener('click', () => {
             const lp = document.getElementById('aht-log-panel');
             if (!lp) return;
-            // Close help panel if open
             const hp = document.getElementById('aht-help-panel');
             if (hp && hp.style.display === 'block') {
                 hp.style.display = 'none';
@@ -861,7 +805,6 @@
         });
 
         document.getElementById('aht-btn-help').addEventListener('click', () => {
-            // Close log panel if open
             const lp = document.getElementById('aht-log-panel');
             if (lp && lp.style.display === 'block') {
                 lp.style.display = 'none';
@@ -880,17 +823,24 @@
         document.getElementById('aht-btn-export').addEventListener('click', exportToExcel);
     }
 
-    // ─── SPA NAVIGATION + DEBOUNCED PANEL SURVIVAL ───────────────────────────
+    // SPA NAVIGATION ───────────────────────────────────────────────────────
     let lastUrl = location.href;
 
     function schedulePanelRebuild() {
         if (rebuildTimeout) clearTimeout(rebuildTimeout);
         rebuildTimeout = setTimeout(() => {
-            if (!document.getElementById('aht-tracker-panel')) buildPanel();
+            nukeAllDuplicates();
+            if (!document.getElementById('aht-tracker-panel')) {
+                buildPanel();
+            }
         }, 500);
     }
 
-    new MutationObserver(() => {
+    if (mutationObserver) mutationObserver.disconnect();
+
+    mutationObserver = new MutationObserver(() => {
+        nukeAllDuplicates();
+
         if (!document.getElementById('aht-tracker-panel')) {
             schedulePanelRebuild();
         }
@@ -917,9 +867,11 @@
             setButtonStates(false);
             setTimeout(refreshCaseType, 1500);
         }
-    }).observe(document, { subtree: true, childList: true });
+    });
 
-    // ─── ROBUST INIT ──────────────────────────────────────────────────────────
+    mutationObserver.observe(document, { subtree: true, childList: true });
+
+    // INIT ─────────────────────────────────────────────────────────────────
     function tryBuildPanel() {
         if (document.body) {
             buildPanel();
@@ -933,4 +885,25 @@
     } else {
         tryBuildPanel();
     }
+
+    // Cleanup
+    window.addEventListener('beforeunload', () => {
+        if (mutationObserver) mutationObserver.disconnect();
+        if (timerInterval) clearInterval(timerInterval);
+    });
+
+    // Debug helper
+    console.log('%c🔧 AHT Tracker Debug Helper', 'color: #00d4ff; font-weight: bold; font-size: 14px;');
+    console.log(`%cInstance ID: ${SCRIPT_INSTANCE_ID}`, 'color: #2ecc71; font-size: 12px;');
+    console.log('%cTo check for duplicates, run: window.__AHT_DEBUG__()', 'color: #f39c12; font-size: 11px;');
+
+    window.__AHT_DEBUG__ = function() {
+        console.log('=== AHT TRACKER DEBUG ===');
+        console.log('Instance ID:', SCRIPT_INSTANCE_ID);
+        console.log('Stored Instance:', sessionStorage.getItem(INSTANCE_STORAGE_KEY));
+        console.log('Panels found:', document.querySelectorAll('[id*="aht-tracker-panel"]').length);
+        console.log('Current Case:', currentCaseId);
+        console.log('Current Type:', currentCaseType);
+        console.log('======================');
+    };
 })();
