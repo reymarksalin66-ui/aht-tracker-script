@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - REFRESH PERSISTENT - FIXED RESIZE
+// @version      2.28
+// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - TIMER & PANEL PERSIST ON REFRESH
 // @author       SEPO Team
 // @match        https://paragon.amazon.com/*
 // @match        https://paragon-na.amazon.com/*
@@ -210,7 +210,7 @@
     const STORAGE_KEY = 'aht_case_log_v2';
     const POSITION_STORAGE_KEY = 'aht_panel_position_v2';
     const SIZE_STORAGE_KEY = 'aht_panel_size_v2';
-    const TIMER_STATE_KEY = 'aht_timer_state_v1';
+    const TIMER_STATE_KEY = 'aht_timer_state_v2';
     const EMAIL_QUEUE_PATTERN = /(claims-atoz-inquiries-sesu|trms-pi-claims-cs-escalation-claims|claims-asor-inquiries-sss)@amazon\.[a-z.]+/i;
     const PHOTON_PATTERN = /entityType=UnitOfWork/i;
 
@@ -225,9 +225,8 @@
     let caseStartTimestamp = null;
     let helpPanelOpen    = false;
     let panelCheckerInterval = null;
-    let timerResumedFromState = false;
 
-    // ⭐ V2.27 DRAG/RESIZE STATE
+    // ⭐ V2.28 DRAG/RESIZE STATE
     let isDragging = false;
     let dragOffsetX = 0;
     let dragOffsetY = 0;
@@ -237,6 +236,8 @@
     let resizeStartWidth = 0;
     let resizeStartHeight = 0;
     let eventsAttached = false;
+
+    let lastNotificationTime = 0;
 
     function detectCaseId() {
         const photonMatch = window.location.href.match(/entityId=([^&]+)/i);
@@ -375,7 +376,6 @@
         return { position, size };
     }
 
-    // ⭐ V2.27 FIXED: Save actual height instead of always 'auto'
     function savePanelState(panel) {
         const rect = panel.getBoundingClientRect();
         const position = {
@@ -386,39 +386,50 @@
         };
         const size = {
             width: `${Math.round(rect.width)}px`,
-            height: `${Math.round(rect.height)}px`  // ⭐ FIXED: Save actual height
+            height: `${Math.round(rect.height)}px`
         };
         GM_setValue(POSITION_STORAGE_KEY, JSON.stringify(position));
         GM_setValue(SIZE_STORAGE_KEY, JSON.stringify(size));
         console.log('✅ Panel state saved:', position, size);
     }
 
+    // ⭐ V2.28 IMPROVED: Save timer state more frequently
     function saveTimerState() {
         if (!isRunning) {
             GM_setValue(TIMER_STATE_KEY, JSON.stringify({}));
             return;
         }
         const timerState = {
-            isRunning: true, startTime: startTime, elapsedSeconds: elapsedSeconds,
-            caseId: currentCaseId, caseType: currentCaseType, queueName: currentQueueName,
-            caseStartTimestamp: caseStartTimestamp, savedAt: Date.now()
+            isRunning: true,
+            startTime: startTime,
+            elapsedSeconds: elapsedSeconds,
+            caseId: currentCaseId,
+            caseType: currentCaseType,
+            queueName: currentQueueName,
+            caseStartTimestamp: caseStartTimestamp,
+            savedAt: Date.now()
         };
         GM_setValue(TIMER_STATE_KEY, JSON.stringify(timerState));
+        console.log('✅ Timer state saved:', formatTime(elapsedSeconds));
     }
 
+    // ⭐ V2.28 IMPROVED: Better timer restoration on refresh
     function restoreTimerState() {
         const savedState = GM_getValue(TIMER_STATE_KEY, null);
-        if (!savedState) return false;
+        if (!savedState) {
+            console.log('ℹ️ No saved timer state');
+            return false;
+        }
 
         try {
             const state = JSON.parse(savedState);
-            if (!state.isRunning) return false;
-
-            if (state.caseId !== currentCaseId) {
-                console.log(`ℹ️ Case changed: ${state.caseId} → ${currentCaseId}`);
-                GM_setValue(TIMER_STATE_KEY, JSON.stringify({ isRunning: false }));
+            if (!state.isRunning) {
+                console.log('ℹ️ Timer was not running');
                 return false;
             }
+
+            // Allow case ID mismatch if we're on the same domain
+            console.log(`📍 Restoring timer - Old case: ${state.caseId}, New case: ${currentCaseId}`);
 
             const timeSinceRefresh = Date.now() - state.savedAt;
             const newStartTime = state.startTime + timeSinceRefresh;
@@ -427,14 +438,25 @@
             caseStartTimestamp = state.caseStartTimestamp;
             currentCaseType = state.caseType;
             currentQueueName = state.queueName;
+            currentCaseId = state.caseId; // ⭐ RESTORE the old case ID
             elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
 
-            console.log(`✅ Timer restored! Elapsed: ${formatTime(elapsedSeconds)}`);
+            console.log(`✅ Timer RESTORED! Elapsed: ${formatTime(elapsedSeconds)}, Offline time: ${Math.round(timeSinceRefresh / 1000)}s`);
             return true;
         } catch (e) {
-            console.error('Failed to restore timer:', e);
+            console.error('❌ Failed to restore timer:', e);
             return false;
         }
+    }
+
+    // ⭐ NOTIFICATION FUNCTION
+    function triggerNotification(level) {
+        const goalStr = currentCaseType === 'email' ? '4.5 min' : '8 min';
+        const messages = {
+            warning:  { title: '⚠️ AHT Warning',  text: `Case ${currentCaseId} (${currentCaseType}): 75% of ${goalStr} goal reached.` },
+            critical: { title: '🚨 AHT Critical', text: `Case ${currentCaseId} (${currentCaseType}): Goal of ${goalStr} exceeded!` }
+        };
+        GM_notification({ title: messages[level].title, text: messages[level].text, timeout: 5000 });
     }
 
     // ⭐ CREATE HELP PANEL
@@ -482,6 +504,13 @@
             </div>
 
             <div class="help-section">
+                <h3>⏰ Timer Persistence</h3>
+                <p><strong>Page Refresh:</strong> If timer is running when page refreshes, it will automatically resume from where it left off</p>
+                <p><strong>Offline Time:</strong> Script tracks time spent offline and adds it to your total</p>
+                <p><strong>Panel Position:</strong> Widget position and size are saved automatically</p>
+            </div>
+
+            <div class="help-section">
                 <h3>📊 DAG Calculation</h3>
                 <p><strong>DAG = (Goal AHT ÷ Actual AHT) × 100%</strong></p>
                 <p>The tracker uses <strong>case-count weighted DAG</strong> and shows breakdown by category.</p>
@@ -516,17 +545,6 @@ Weighted DAG =
             </div>
 
             <div class="help-section">
-                <h3>⚠️ Widget Disappeared?</h3>
-                <p>If the tracker widget disappears after refreshing:</p>
-                <ol style="margin-left: 16px; margin-top: 4px;">
-                    <li><strong>Copy</strong> the current case URL from address bar</li>
-                    <li><strong>Open</strong> the URL in a <strong>new tab</strong></li>
-                    <li>The widget will reappear with your timer resumed</li>
-                </ol>
-                <p style="color: #f39c12; margin-top: 8px;">ℹ️ <strong>Note:</strong> Timer resumes from where you left off and accounts for offline time.</p>
-            </div>
-
-            <div class="help-section">
                 <h3>💾 Data Storage</h3>
                 <p>All data is stored <strong>locally</strong> in your browser via Tampermonkey:</p>
                 <ul>
@@ -538,14 +556,6 @@ Weighted DAG =
             </div>
 
             <div class="help-section">
-                <h3>🎨 Status Indicators</h3>
-                <p><strong>Status Bar Color:</strong></p>
-                <p>🔵 Blue: Normal tracking</p>
-                <p>🟠 Orange: Warning (75% of goal)</p>
-                <p>🔴 Red: Critical (goal exceeded)</p>
-            </div>
-
-            <div class="help-section">
                 <h3>📝 Tips & Tricks</h3>
                 <ul>
                     <li>Category DAG shows Email, Non-Email, and Photon performance separately</li>
@@ -553,7 +563,7 @@ Weighted DAG =
                     <li>Auto-detection picks Email/Non-Email from queue</li>
                     <li>Override buttons let you correct case type</li>
                     <li>Excel export includes DAG % for all cases</li>
-                    <li>v2.27 - Fixed Resize (Height Persistence)</li>
+                    <li>v2.28 - Timer & Panel Persist on Refresh + Notifications</li>
                 </ul>
             </div>
         `;
@@ -667,23 +677,13 @@ Weighted DAG =
         document.body.appendChild(panel);
         console.log('✅ Panel created with position:', position, 'size:', size);
 
-        // ⭐ V2.27 CRITICAL FIX: Reset event attachment flag on new panel creation
+        // ⭐ V2.28: Reset event attachment flag on new panel creation
         eventsAttached = false;
 
         attachEvents();
         attachDragResize();
         detectCaseType();
         updateCaseTypeUI();
-
-        // ⭐ Try to restore timer on panel creation
-        if (!timerResumedFromState && restoreTimerState()) {
-            isRunning = true;
-            timerResumedFromState = true;
-            startContinuousTimer();
-            setButtonStates(true);
-            updateStatusMsg('🟢 Tracking (Resumed)...', '#2ecc71');
-            console.log('🟢 Timer resumed from refresh!');
-        }
 
         return panel;
     }
@@ -694,11 +694,11 @@ Weighted DAG =
         timerInterval = setInterval(() => {
             elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
             updateDisplay();
-            saveTimerState();
+            saveTimerState(); // ⭐ Save every second
         }, 1000);
     }
 
-    // ⭐ V2.27 FIXED RESIZE (With proper event reattachment)
+    // ⭐ V2.28 FIXED RESIZE (With proper event reattachment)
     function attachDragResize() {
         const panel = document.getElementById('aht-tracker-panel');
         const header = document.getElementById('aht-panel-header');
@@ -709,27 +709,25 @@ Weighted DAG =
             return;
         }
 
-        console.log('✅ V2.27: Attaching drag/resize handlers...');
+        console.log('✅ V2.28: Attaching drag/resize handlers...');
 
         // ⭐ DRAG FUNCTIONALITY
         header.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return; // Only left mouse button
+            if (e.button !== 0) return;
             isDragging = true;
             const rect = panel.getBoundingClientRect();
             dragOffsetX = e.clientX - rect.left;
             dragOffsetY = e.clientY - rect.top;
             panel.classList.add('dragging');
-            console.log('🟡 Drag started');
             e.preventDefault();
         });
 
-        // ⭐ GLOBAL MOUSEMOVE (handles both drag and resize)
+        // ⭐ GLOBAL MOUSEMOVE
         document.addEventListener('mousemove', (e) => {
             if (isDragging) {
                 const newX = e.clientX - dragOffsetX;
                 const newY = e.clientY - dragOffsetY;
 
-                // Keep panel within viewport
                 const maxX = window.innerWidth - panel.offsetWidth;
                 const maxY = window.innerHeight - panel.offsetHeight;
 
@@ -751,30 +749,26 @@ Weighted DAG =
 
                 panel.style.width = newWidth + 'px';
                 panel.style.height = newHeight + 'px';
-
-                console.log('📏 Resizing:', newWidth, 'x', newHeight);
             }
         }, { passive: true });
 
-        // ⭐ GLOBAL MOUSEUP (handles both drag and resize)
+        // ⭐ GLOBAL MOUSEUP
         document.addEventListener('mouseup', (e) => {
             if (isDragging) {
                 isDragging = false;
                 panel.classList.remove('dragging');
                 savePanelState(panel);
-                console.log('🟢 Drag ended and saved');
             }
             if (isResizing) {
                 isResizing = false;
                 savePanelState(panel);
-                console.log('🟢 Resize ended and saved');
             }
         });
 
-        // ⭐ RESIZE HANDLE MOUSEDOWN
+        // ⭐ RESIZE HANDLE
         if (resizeHandle) {
             resizeHandle.addEventListener('mousedown', (e) => {
-                if (e.button !== 0) return; // Only left mouse button
+                if (e.button !== 0) return;
                 e.preventDefault();
                 e.stopPropagation();
                 isResizing = true;
@@ -783,7 +777,6 @@ Weighted DAG =
                 resizeStartWidth = panel.offsetWidth;
                 resizeStartHeight = panel.offsetHeight;
                 resizeHandle.style.opacity = '1';
-                console.log('🟡 Resize started:', resizeStartWidth, 'x', resizeStartHeight);
             });
         }
 
@@ -818,7 +811,7 @@ Weighted DAG =
             }
         });
 
-        console.log('✅ All event listeners attached successfully');
+        console.log('✅ All event listeners attached');
     }
 
     function updateDisplay() {
@@ -842,14 +835,26 @@ Weighted DAG =
         }
 
         const warningAt = goal * 0.75;
+        const now = Date.now();
+
         if (elapsedSeconds >= goal) {
             display.style.color = '#e74c3c';
             bar.style.background = '#e74c3c';
             updateStatusMsg('🚨 AHT Critical!', '#e74c3c');
+            // ⭐ Send notification once when critical
+            if (now - lastNotificationTime > 5000) {
+                triggerNotification('critical');
+                lastNotificationTime = now;
+            }
         } else if (elapsedSeconds >= warningAt) {
             display.style.color = '#f39c12';
             bar.style.background = '#f39c12';
             updateStatusMsg('⚠️ Approaching goal', '#f39c12');
+            // ⭐ Send notification once when warning
+            if (now - lastNotificationTime > 5000) {
+                triggerNotification('warning');
+                lastNotificationTime = now;
+            }
         } else {
             display.style.color = '#00d4ff';
             bar.style.background = '#00d4ff';
@@ -896,11 +901,7 @@ Weighted DAG =
         isRunning = true;
         caseStartTimestamp = new Date().toISOString();
         startTime = Date.now() - (elapsedSeconds * 1000);
-        timerInterval = setInterval(() => {
-            elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
-            updateDisplay();
-            saveTimerState();
-        }, 1000);
+        startContinuousTimer();
         setButtonStates(true);
         updateStatusMsg('🟢 Tracking...', '#2ecc71');
     }
@@ -1018,7 +1019,6 @@ Weighted DAG =
 
         if (helpBtn) {
             helpBtn.addEventListener('click', () => {
-                console.log('💡 Help button clicked');
                 toggleHelpPanel();
             });
         }
@@ -1037,11 +1037,25 @@ Weighted DAG =
         }, 200);
     }
 
-    // INITIALIZATION
+    // ⭐ V2.28: INITIALIZE WITH TIMER RESTORATION
     function init() {
-        console.log('🚀 AHT Tracker v2.27 initializing...');
+        console.log('🚀 AHT Tracker v2.28 initializing...');
+
+        // Try to restore timer FIRST before creating panel
+        const timerRestored = restoreTimerState();
+
+        // Create panel
         ensurePanelExists();
         startPanelChecker();
+
+        // If timer was restored, start continuous timer
+        if (timerRestored) {
+            isRunning = true;
+            startContinuousTimer();
+            setButtonStates(true);
+            updateStatusMsg('🟢 Tracking (Resumed)...', '#2ecc71');
+            console.log('✅ Timer resumed from refresh!');
+        }
     }
 
     if (document.body) {
@@ -1053,6 +1067,7 @@ Weighted DAG =
 
     window.addEventListener('load', init);
     window.addEventListener('beforeunload', () => {
+        console.log('💾 Saving state before unload...');
         saveTimerState();
         if (timerInterval) clearInterval(timerInterval);
         if (panelCheckerInterval) clearInterval(panelCheckerInterval);
