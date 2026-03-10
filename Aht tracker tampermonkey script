@@ -2,7 +2,7 @@
 // @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
 // @version      2.0
-// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - TIMER & PANEL PERSIST ON REFRESH - ONE NOTIFICATION PER THRESHOLD
+// @description  Tracks AHT per case with case-count weighted DAG, Excel export - DRAGGABLE & RESIZABLE - MINIMIZABLE - ALL MARKETPLACES & QUEUES - INCLUDES PHOTON FALLBACK - TIMER PERSISTS ON REFRESH (SAME CASE ONLY)
 // @author       sreymark
 // @match        https://paragon.amazon.com/*
 // @match        https://paragon-na.amazon.com/*
@@ -13,208 +13,26 @@
 // @grant        GM_notification
 // @grant        GM_xmlhttpRequest
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
-// @run-at       document-start
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    // ⭐ INSTANCE TRACKING - PREVENTS DUPLICATES
-    const SCRIPT_INSTANCE_ID = 'AHT_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-    const INSTANCE_STORAGE_KEY = 'aht_tracker_instance_id';
-
-    let storedInstanceId = sessionStorage.getItem(INSTANCE_STORAGE_KEY);
-    if (storedInstanceId && storedInstanceId !== SCRIPT_INSTANCE_ID) {
-        console.log('⚠️ Another AHT Tracker instance already running');
-        return;
-    }
-    sessionStorage.setItem(INSTANCE_STORAGE_KEY, SCRIPT_INSTANCE_ID);
-
-    // ⭐ EARLY CSS INJECTION (at document-start)
-    function injectStyles() {
-        const style = document.createElement('style');
-        style.id = 'aht-tracker-styles';
-        style.textContent = `
-            #aht-tracker-panel {
-                position: fixed !important;
-                width: 260px !important;
-                background: #1a1a2e !important;
-                color: #eaeaea !important;
-                border-radius: 12px !important;
-                padding: 14px 16px !important;
-                font-family: Arial, sans-serif !important;
-                font-size: 13px !important;
-                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5) !important;
-                z-index: 999999 !important;
-                user-select: none !important;
-                overflow-y: auto !important;
-                overflow-x: hidden !important;
-                margin: 0 !important;
-                display: block !important;
-                visibility: visible !important;
-                opacity: 1 !important;
-            }
-
-            #aht-tracker-panel.dragging {
-                cursor: grabbing !important;
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8) !important;
-            }
-
-            #aht-panel-header {
-                cursor: grab !important;
-                user-select: none !important;
-            }
-
-            #aht-panel-header:active {
-                cursor: grabbing !important;
-            }
-
-            #aht-resize-handle {
-                position: absolute !important;
-                bottom: 0 !important;
-                right: 0 !important;
-                width: 20px !important;
-                height: 20px !important;
-                cursor: nwse-resize !important;
-                background: linear-gradient(135deg, transparent 0%, transparent 50%, #2980b9 50%, #2980b9 100%) !important;
-                border-radius: 0 0 12px 0 !important;
-                opacity: 0.5 !important;
-                pointer-events: all !important;
-                z-index: 10001 !important;
-            }
-
-            #aht-resize-handle:hover {
-                background: linear-gradient(135deg, transparent 0%, transparent 50%, #3498db 50%, #3498db 100%) !important;
-                opacity: 1 !important;
-            }
-
-            #aht-help-panel {
-                position: fixed !important;
-                bottom: 20px !important;
-                right: 320px !important;
-                top: auto !important;
-                left: auto !important;
-                width: 450px !important;
-                max-height: 600px !important;
-                background: #1a1a2e !important;
-                color: #eaeaea !important;
-                border-radius: 12px !important;
-                padding: 16px !important;
-                font-family: Arial, sans-serif !important;
-                font-size: 12px !important;
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8) !important;
-                z-index: 999998 !important;
-                user-select: text !important;
-                overflow-y: auto !important;
-                overflow-x: hidden !important;
-                margin: 0 !important;
-                visibility: visible !important;
-                opacity: 1 !important;
-                border: 2px solid #2980b9 !important;
-            }
-
-            #aht-help-panel h2 {
-                color: #00d4ff !important;
-                margin-top: 0 !important;
-                margin-bottom: 10px !important;
-                font-size: 14px !important;
-                border-bottom: 2px solid #2980b9 !important;
-                padding-bottom: 6px !important;
-            }
-
-            #aht-help-panel h3 {
-                color: #f39c12 !important;
-                margin-top: 12px !important;
-                margin-bottom: 6px !important;
-                font-size: 12px !important;
-            }
-
-            #aht-help-panel p, #aht-help-panel li {
-                margin: 4px 0 !important;
-                color: #ccc !important;
-                font-size: 11px !important;
-                line-height: 1.4 !important;
-            }
-
-            #aht-help-panel ul {
-                margin-left: 16px !important;
-                margin-top: 4px !important;
-                margin-bottom: 8px !important;
-            }
-
-            #aht-help-panel ol {
-                margin-left: 16px !important;
-                margin-top: 4px !important;
-                margin-bottom: 8px !important;
-            }
-
-            #aht-help-panel .help-section {
-                background: #0f0f1a !important;
-                border-left: 3px solid #2980b9 !important;
-                padding: 8px !important;
-                border-radius: 4px !important;
-                margin-bottom: 10px !important;
-            }
-
-            #aht-help-panel .code-block {
-                background: #0a0a14 !important;
-                border: 1px solid #333 !important;
-                padding: 6px !important;
-                border-radius: 4px !important;
-                font-family: monospace !important;
-                font-size: 10px !important;
-                color: #00d4ff !important;
-                margin: 4px 0 !important;
-                overflow-x: auto !important;
-            }
-
-            #aht-help-panel .close-btn {
-                position: absolute !important;
-                top: 8px !important;
-                right: 8px !important;
-                background: #e74c3c !important;
-                color: #fff !important;
-                border: none !important;
-                border-radius: 50% !important;
-                width: 24px !important;
-                height: 24px !important;
-                cursor: pointer !important;
-                font-size: 14px !important;
-                padding: 0 !important;
-                display: flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                z-index: 10000 !important;
-            }
-
-            #aht-help-panel .close-btn:hover {
-                background: #c0392b !important;
-            }
-        `;
-
-        if (document.head) {
-            document.head.appendChild(style);
-        } else {
-            document.documentElement.appendChild(style);
-        }
-    }
-
-    injectStyles();
-
-    // CONFIG ───────────────────────────────────────────────────────────────
+    // ─── CONFIG ───────────────────────────────────────────────────────────────
     const AHT_GOALS = {
-        email:    4.5 * 60,
-        nonemail: 8.0 * 60,
-        photon:   8.0 * 60
+        email:    4.5 * 60,   // 270 seconds
+        nonemail: 8.0 * 60,   // 480 seconds
+        photon:   8.0 * 60    // 480 seconds (Photon fallback)
     };
     const STORAGE_KEY = 'aht_case_log_v2';
-    const POSITION_STORAGE_KEY = 'aht_panel_position_v2';
-    const SIZE_STORAGE_KEY = 'aht_panel_size_v2';
-    const TIMER_STATE_KEY = 'aht_timer_state_v2';
+    const POSITION_STORAGE_KEY = 'aht_panel_position_v1';
+    const SIZE_STORAGE_KEY = 'aht_panel_size_v1';
+    const TIMER_STATE_KEY = 'aht_timer_state_v1';
+    const MINIMIZED_STATE_KEY = 'aht_panel_minimized_v1';
     const EMAIL_QUEUE_PATTERN = /(claims-atoz-inquiries-sesu|trms-pi-claims-cs-escalation-claims|claims-asor-inquiries-sss)@amazon\.[a-z.]+/i;
-    const PHOTON_PATTERN = /entityType=UnitOfWork/i;
+    const PHOTON_QUEUE_PATTERN = /(trms_pi_ph_uw_otc_fallback_uow|photon.*fallback|fallback.*photon)/i;
 
-    // STATE ────────────────────────────────────────────────────────────────
+    // ─── STATE ────────────────────────────────────────────────────────────────
     let timerInterval    = null;
     let startTime        = null;
     let elapsedSeconds   = 0;
@@ -223,14 +41,11 @@
     let currentCaseType  = 'nonemail';
     let currentQueueName = '';
     let caseStartTimestamp = null;
+    let rebuildTimeout   = null;
     let helpPanelOpen    = false;
-    let panelCheckerInterval = null;
+    let isMinimized       = false;
 
-    // ⭐ V2.29 NOTIFICATION STATE - ONE PER THRESHOLD PER SESSION
-    let warningNotificationSent = false;
-    let criticalNotificationSent = false;
-
-    // ⭐ V2.28 DRAG/RESIZE STATE
+    // ─── DRAGGING STATE ───────────────────────────────────────────────────────
     let isDragging = false;
     let dragOffsetX = 0;
     let dragOffsetY = 0;
@@ -239,25 +54,55 @@
     let resizeStartY = 0;
     let resizeStartWidth = 0;
     let resizeStartHeight = 0;
-    let eventsAttached = false;
 
+    // ─── ATOM ICON SVG (Outline Style) ────────────────────────────────────────
+    function getAtomSVG() {
+        return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="display:inline;margin-right:4px;vertical-align:text-bottom;">
+            <!-- Nucleus -->
+            <circle cx="12" cy="12" r="2" stroke="currentColor" fill="none"/>
+            <!-- Orbital 1 (horizontal) -->
+            <ellipse cx="12" cy="12" rx="6" ry="3" stroke="currentColor" fill="none"/>
+            <!-- Orbital 2 (vertical rotated) -->
+            <ellipse cx="12" cy="12" rx="3" ry="6" stroke="currentColor" fill="none" transform="rotate(60 12 12)"/>
+            <!-- Orbital 3 (vertical rotated) -->
+            <ellipse cx="12" cy="12" rx="3" ry="6" stroke="currentColor" fill="none" transform="rotate(120 12 12)"/>
+            <!-- Electrons on orbitals -->
+            <circle cx="18" cy="12" r="1.5" stroke="currentColor" fill="none"/>
+            <circle cx="9" cy="17.2" r="1.5" stroke="currentColor" fill="none"/>
+            <circle cx="15" cy="6.8" r="1.5" stroke="currentColor" fill="none"/>
+        </svg>`;
+    }
+
+    // ─── DETECT CASE ID FROM URL ──────────────────────────────────────────────
     function detectCaseId() {
-        const photonMatch = window.location.href.match(/entityId=([^&]+)/i);
-        if (photonMatch) return 'UOW-' + decodeURIComponent(photonMatch[1]).substring(0, 20);
-
         const caseIdParam = new URLSearchParams(window.location.search).get('caseId');
         if (caseIdParam) return caseIdParam;
         const idParam = new URLSearchParams(window.location.search).get('id');
         if (idParam) return idParam;
+
+        // ⭐ Check for UnitOfWork entityId (Photon fallback format)
+        const entityId = new URLSearchParams(window.location.search).get('entityId');
+        if (entityId) {
+            const caseMatch = entityId.match(/^(\d+)%3A/);
+            if (caseMatch) return caseMatch[1];
+        }
+
         const pathMatch = window.location.href.match(/\/(cases|investigation|view-case)\/([A-Z0-9\-]+)/i);
         if (pathMatch) return pathMatch[2];
         return 'UNKNOWN-' + Date.now();
     }
 
+    // ─── DETECT CASE TYPE FROM URL & QUEUE NAME ───────────────────────────────
     function detectCaseType() {
-        if (PHOTON_PATTERN.test(window.location.href)) {
+        // ⭐ HIGHEST PRIORITY: Check if entityType=UnitOfWork (Photon URL pattern)
+        const entityType = new URLSearchParams(window.location.search).get('entityType');
+        if (entityType === 'UnitOfWork') {
             currentCaseType = 'photon';
-            currentQueueName = 'Photon Fallback';
+            currentQueueName = 'Photon Fallback (UnitOfWork)';
+            console.log('====== AHT TRACKER DEBUG ======');
+            console.log('🔍 Detected via URL: entityType=UnitOfWork');
+            console.log('Case Type Detected:', 'photon (UnitOfWork)');
+            console.log('====== END DEBUG ======');
             return currentCaseType;
         }
 
@@ -273,10 +118,30 @@
             if (match) { queueName = match[1].trim(); break; }
         }
         currentQueueName = queueName;
-        currentCaseType = EMAIL_QUEUE_PATTERN.test(currentQueueName) ? 'email' : 'nonemail';
+
+        console.log('====== AHT TRACKER DEBUG ======');
+        console.log('Queue Found:', currentQueueName);
+        console.log('Email Pattern:', EMAIL_QUEUE_PATTERN);
+        console.log('Photon Pattern:', PHOTON_QUEUE_PATTERN);
+        console.log('Email Match:', EMAIL_QUEUE_PATTERN.test(currentQueueName));
+        console.log('Photon Match:', PHOTON_QUEUE_PATTERN.test(currentQueueName));
+
+        // ⭐ PRIORITY: Check Photon first, then Email, then default to Non-Email
+        if (PHOTON_QUEUE_PATTERN.test(currentQueueName)) {
+            currentCaseType = 'photon';
+        } else if (EMAIL_QUEUE_PATTERN.test(currentQueueName)) {
+            currentCaseType = 'email';
+        } else {
+            currentCaseType = 'nonemail';
+        }
+
+        console.log('Case Type Detected:', currentCaseType);
+        console.log('====== END DEBUG ======');
+
         return currentCaseType;
     }
 
+    // ─── FORMAT TIME ──────────────────────────────────────────────────────────
     function formatTime(seconds) {
         const m = Math.floor(seconds / 60).toString().padStart(2, '0');
         const s = (seconds % 60).toString().padStart(2, '0');
@@ -287,11 +152,13 @@
         return parseFloat((seconds / 60).toFixed(2));
     }
 
+    // ─── DAG ACHIEVEMENT (Individual Case) ─────────────────────────────────────
     function calcDAG(actualSeconds, caseType) {
         if (actualSeconds === 0) return null;
         return ((AHT_GOALS[caseType] / actualSeconds) * 100).toFixed(1);
     }
 
+    // ─── WEIGHTED STATS (CASE-COUNT WEIGHTED WITH WEIGHTED GOAL) ───────────────
     function calcWeightedStats(log) {
         if (log.length === 0) return null;
 
@@ -325,86 +192,35 @@
 
         const weightedGoalAHT = (AHT_GOALS.email * emailWeight) + (AHT_GOALS.nonemail * nonEmailWeight) + (AHT_GOALS.photon * photonWeight);
         const weightedAchievedAHT = (avgEmailAHT * emailWeight) + (avgNonEmailAHT * nonEmailWeight) + (avgPhotonAHT * photonWeight);
-        const weightedDAG = weightedAchievedAHT > 0 ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1) : null;
+        const weightedDAG = weightedAchievedAHT > 0
+            ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1)
+            : null;
 
         const totalGoalAHT = (AHT_GOALS.email * emailCount) + (AHT_GOALS.nonemail * nonEmailCount) + (AHT_GOALS.photon * photonCount);
         const totalAchievedAHT = emailTotal + nonEmailTotal + photonTotal;
 
-        return { weightedDAG, weightedGoalAHT, weightedAchievedAHT, totalGoalAHT, totalAchievedAHT, totalCases, emailCount, nonEmailCount, photonCount, avgEmail: avgEmailAHT, avgNonEmail: avgNonEmailAHT, avgPhoton: avgPhotonAHT, emailDAG, nonEmailDAG, photonDAG };
-    }
-
-    function exportToExcel() {
-        const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
-        if (log.length === 0) { alert('No cases logged yet.'); return; }
-
-        const stats = calcWeightedStats(log);
-        const wb = XLSX.utils.book_new();
-
-        const caseRows = log.map((entry, idx) => ({
-            '#': idx + 1, 'Case ID': entry.caseId,
-            'Case Type': entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon' : 'Non-Email',
-            'Queue Name': entry.queueName || 'N/A',
-            'Start Time': entry.startTime ? new Date(entry.startTime).toLocaleString() : 'N/A',
-            'End Time': entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'N/A',
-            'AHT (mm:ss)': entry.formatted,
-            'AHT (minutes)': secondsToMinutes(entry.duration),
-            'Goal (minutes)': secondsToMinutes(entry.goal),
-            'DAG %': parseFloat(entry.dag),
-            'DAG Status': parseFloat(entry.dag) >= 100 ? 'Achieved' : parseFloat(entry.dag) >= 80 ? 'Near Goal' : 'Below Goal'
-        }));
-        const ws1 = XLSX.utils.json_to_sheet(caseRows);
-        ws1['!cols'] = [{wch:4},{wch:18},{wch:12},{wch:28},{wch:22},{wch:22},{wch:12},{wch:14},{wch:14},{wch:10},{wch:14}];
-        XLSX.utils.book_append_sheet(wb, ws1, 'Case Log');
-
-        const summaryRows = [
-            { 'Metric': 'Total Cases', 'Value': stats.totalCases },
-            { 'Metric': 'Email Cases', 'Value': stats.emailCount },
-            { 'Metric': 'Non-Email Cases', 'Value': stats.nonEmailCount },
-            { 'Metric': 'Photon Cases', 'Value': stats.photonCount }
-        ];
-        const ws2 = XLSX.utils.json_to_sheet(summaryRows);
-        XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
-
-        XLSX.writeFile(wb, `AHT_Log_${new Date().toISOString().slice(0,10)}.xlsx`);
-    }
-
-    function btnStyle(bg, large = false) {
-        return large ? `background:${bg};color:#fff;border:none;border-radius:8px;padding:12px 14px;cursor:pointer;font-size:13px;font-weight:bold;flex:1;` : `background:${bg};color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:bold;`;
-    }
-
-    function loadPanelState() {
-        const position = JSON.parse(GM_getValue(POSITION_STORAGE_KEY, '{"left":"auto","top":"auto","bottom":"20px","right":"20px"}'));
-        const size = JSON.parse(GM_getValue(SIZE_STORAGE_KEY, '{"width":"260px","height":"auto"}'));
-        return { position, size };
-    }
-
-    function savePanelState(panel) {
-        const rect = panel.getBoundingClientRect();
-        const position = {
-            left: rect.left > 0 ? `${Math.round(rect.left)}px` : 'auto',
-            top: rect.top > 0 ? `${Math.round(rect.top)}px` : 'auto',
-            bottom: rect.left > 0 ? 'auto' : `${Math.round(window.innerHeight - rect.bottom)}px`,
-            right: rect.left > 0 ? 'auto' : `${Math.round(window.innerWidth - rect.right)}px`
+        return {
+            weightedDAG,
+            weightedGoalAHT,
+            weightedAchievedAHT,
+            totalGoalAHT,
+            totalAchievedAHT,
+            totalCases,
+            emailCount, nonEmailCount, photonCount,
+            avgEmail: avgEmailAHT,
+            avgNonEmail: avgNonEmailAHT,
+            avgPhoton: avgPhotonAHT,
+            emailDAG,
+            nonEmailDAG,
+            photonDAG
         };
-        const size = {
-            width: `${Math.round(rect.width)}px`,
-            height: `${Math.round(rect.height)}px`
-        };
-        GM_setValue(POSITION_STORAGE_KEY, JSON.stringify(position));
-        GM_setValue(SIZE_STORAGE_KEY, JSON.stringify(size));
-        console.log('✅ Panel state saved:', position, size);
     }
 
-    // ⭐ V2.28 IMPROVED: Save timer state more frequently
+    // ─── SAVE TIMER STATE ─────────────────────────────────────────────────────
     function saveTimerState() {
-        if (!isRunning) {
-            GM_setValue(TIMER_STATE_KEY, JSON.stringify({}));
-            return;
-        }
         const timerState = {
-            isRunning: true,
+            isRunning: isRunning,
             startTime: startTime,
-            elapsedSeconds: elapsedSeconds,
             caseId: currentCaseId,
             caseType: currentCaseType,
             queueName: currentQueueName,
@@ -412,409 +228,394 @@
             savedAt: Date.now()
         };
         GM_setValue(TIMER_STATE_KEY, JSON.stringify(timerState));
-        console.log('✅ Timer state saved:', formatTime(elapsedSeconds));
+        console.log('💾 Timer state saved:', timerState);
     }
 
-    // ⭐ V2.28 IMPROVED: Better timer restoration on refresh
+    // ─── RESTORE TIMER STATE ──────────────────────────────────────────────────
     function restoreTimerState() {
-        const savedState = GM_getValue(TIMER_STATE_KEY, null);
-        if (!savedState) {
-            console.log('ℹ️ No saved timer state');
-            return false;
-        }
-
         try {
-            const state = JSON.parse(savedState);
-            if (!state.isRunning) {
-                console.log('ℹ️ Timer was not running');
+            const timerState = JSON.parse(GM_getValue(TIMER_STATE_KEY, 'null'));
+            if (!timerState) {
+                console.log('ℹ️ No saved timer state found');
                 return false;
             }
 
-            // Allow case ID mismatch if we're on the same domain
-            console.log(`📍 Restoring timer - Old case: ${state.caseId}, New case: ${currentCaseId}`);
+            console.log('====== TIMER RESTORE DEBUG ======');
+            console.log('Saved timer state found:', timerState);
+            console.log('Current Case ID:', currentCaseId);
+            console.log('Saved Case ID:', timerState.caseId);
 
-            const timeSinceRefresh = Date.now() - state.savedAt;
-            const newStartTime = state.startTime + timeSinceRefresh;
-
-            startTime = newStartTime;
-            caseStartTimestamp = state.caseStartTimestamp;
-            currentCaseType = state.caseType;
-            currentQueueName = state.queueName;
-            currentCaseId = state.caseId; // ⭐ RESTORE the old case ID
-            elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
-
-            console.log(`✅ Timer RESTORED! Elapsed: ${formatTime(elapsedSeconds)}, Offline time: ${Math.round(timeSinceRefresh / 1000)}s`);
-            return true;
-        } catch (e) {
-            console.error('❌ Failed to restore timer:', e);
-            return false;
-        }
-    }
-
-    // ⭐ V2.29 NOTIFICATION FUNCTION
-    function triggerNotification(level) {
-        const goalStr = currentCaseType === 'email' ? '4.5 min' : '8 min';
-        const messages = {
-            warning:  { title: '⚠️ AHT Warning',  text: `Case ${currentCaseId} (${currentCaseType}): 75% of ${goalStr} goal reached.` },
-            critical: { title: '🚨 AHT Critical', text: `Case ${currentCaseId} (${currentCaseType}): Goal of ${goalStr} exceeded!` }
-        };
-        GM_notification({ title: messages[level].title, text: messages[level].text, timeout: 5000 });
-    }
-
-    // ⭐ CREATE HELP PANEL
-    function createHelpPanel() {
-        let helpPanel = document.getElementById('aht-help-panel');
-
-        if (helpPanel) {
-            return helpPanel;
-        }
-
-        helpPanel = document.createElement('div');
-        helpPanel.id = 'aht-help-panel';
-        helpPanel.innerHTML = `
-            <button class="close-btn" id="aht-close-help" style="position: absolute; top: 8px; right: 8px; background: #e74c3c; color: #fff; border: none; border-radius: 50%; width: 24px; height: 24px; cursor: pointer; font-size: 14px; padding: 0; display: flex; align-items: center; justify-content: center; z-index: 10000;">✕</button>
-            <h2>📖 AHT Tracker Help</h2>
-
-            <div class="help-section">
-                <h3>🚀 Quick Start</h3>
-                <ol style="margin-left: 16px; margin-top: 4px;">
-                    <li>Open a case in Paragon</li>
-                    <li>Click <strong>▶ START</strong> button to begin tracking</li>
-                    <li>Work on the case</li>
-                    <li>Click <strong>⏹ STOP</strong> when done</li>
-                    <li>Time is automatically logged</li>
-                </ol>
-            </div>
-
-            <div class="help-section">
-                <h3>🎯 Button Guide</h3>
-                <p><strong>▶ START:</strong> Begin timing the current case</p>
-                <p><strong>⏹ STOP:</strong> End timing and save to log</p>
-                <p><strong>📧 EMAIL:</strong> Override case type as Email (Goal: 4:30)</p>
-                <p><strong>📁 NON-EMAIL:</strong> Override case type as Non-Email (Goal: 8:00)</p>
-                <p><strong>⚛️ PHOTON:</strong> Override case type as Photon (Goal: 8:00)</p>
-                <p><strong>📋 LOG:</strong> Show/hide last 10 cases with category DAG breakdown</p>
-                <p><strong>📥 EXPORT:</strong> Download all logs as Excel file</p>
-                <p><strong>🗑 CLEAR:</strong> Delete all logged cases (⚠️ irreversible)</p>
-                <p><strong>💡 HELP:</strong> Show this help panel</p>
-            </div>
-
-            <div class="help-section">
-                <h3>🎨 Widget Controls</h3>
-                <p><strong>Drag to Move:</strong> Click and hold the widget header (⏱ AHT Tracker), then drag anywhere on screen to relocate</p>
-                <p><strong>Resize:</strong> Look for the blue triangle in the <strong>bottom-right corner</strong>. Drag it to resize the widget width and height</p>
-            </div>
-
-            <div class="help-section">
-                <h3>⏰ Timer Persistence</h3>
-                <p><strong>Page Refresh:</strong> If timer is running when page refreshes, it will automatically resume from where it left off</p>
-                <p><strong>Offline Time:</strong> Script tracks time spent offline and adds it to your total</p>
-                <p><strong>Panel Position:</strong> Widget position and size are saved automatically</p>
-            </div>
-
-            <div class="help-section">
-                <h3>🔔 Notifications (v2.29)</h3>
-                <p><strong>One-Time Alerts:</strong> Each timer session triggers:</p>
-                <ul>
-                    <li><strong>⚠️ Warning:</strong> Once when reaching 75% of goal</li>
-                    <li><strong>🚨 Critical:</strong> Once when exceeding goal</li>
-                </ul>
-                <p>Alerts reset when you stop the timer or start a new case.</p>
-            </div>
-
-            <div class="help-section">
-                <h3>📊 DAG Calculation</h3>
-                <p><strong>DAG = (Goal AHT ÷ Actual AHT) × 100%</strong></p>
-                <p>The tracker uses <strong>case-count weighted DAG</strong> and shows breakdown by category.</p>
-                <div class="code-block">
-For each case type:
-- Email Goal: 270 sec (4:30)
-- Non-Email Goal: 480 sec (8:00)
-- Photon Goal: 480 sec (8:00)
-
-Weighted DAG Example:
-━━━━━━━━━━━━━━━━━━━━━━
-5 Email @ avg 200 sec
-5 Non-Email @ avg 400 sec
-
-Weight = case count / total
-Email: 5/10 = 50%
-Non-Email: 5/10 = 50%
-
-Goal AHT =
-  (270 × 0.5) + (480 × 0.5) = 375 sec
-
-Achieved AHT =
-  (200 × 0.5) + (400 × 0.5) = 300 sec
-
-Weighted DAG =
-  (375 ÷ 300) × 100 = 125%
-                </div>
-                <p><strong>DAG Status:</strong></p>
-                <p>🟢 <strong>≥100%:</strong> Goal achieved</p>
-                <p>🟡 <strong>80-99%:</strong> Near goal</p>
-                <p>🔴 <strong>&lt;80%:</strong> Below goal</p>
-            </div>
-
-            <div class="help-section">
-                <h3>💾 Data Storage</h3>
-                <p>All data is stored <strong>locally</strong> in your browser via Tampermonkey:</p>
-                <ul>
-                    <li>Case logs & AHT times</li>
-                    <li>Timer state (survives refresh)</li>
-                    <li>Widget position & size</li>
-                </ul>
-                <p style="color: #f39c12;">⚠️ Clearing browser data will delete all logs!</p>
-            </div>
-
-            <div class="help-section">
-                <h3>📝 Tips & Tricks</h3>
-                <ul>
-                    <li>Category DAG shows Email, Non-Email, and Photon performance separately</li>
-                    <li>Weighted DAG is the overall performance metric</li>
-                    <li>Auto-detection picks Email/Non-Email from queue</li>
-                    <li>Override buttons let you correct case type</li>
-                    <li>Excel export includes DAG % for all cases</li>
-                    <li>v2.29 - One notification per threshold per timer session</li>
-                </ul>
-            </div>
-        `;
-
-        document.body.appendChild(helpPanel);
-
-        setTimeout(() => {
-            const closeBtn = document.getElementById('aht-close-help');
-            if (closeBtn) {
-                closeBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    helpPanelOpen = false;
-                    helpPanel.style.display = 'none';
-                    console.log('✅ Help panel closed');
-                });
+            // ⭐ CHECK IF CASE IDs MATCH
+            if (timerState.caseId !== currentCaseId) {
+                console.log('❌ Case ID mismatch! Different case detected.');
+                console.log(`Saved: ${timerState.caseId} | Current: ${currentCaseId}`);
+                GM_setValue(TIMER_STATE_KEY, JSON.stringify({ isRunning: false }));
+                console.log('Timer state cleared for new case.');
+                console.log('====== END DEBUG ======');
+                return false;
             }
-        }, 10);
 
-        console.log('✅ Help panel created');
-        return helpPanel;
+            // ⭐ SAME CASE - Check if timer was running
+            if (timerState.isRunning && timerState.startTime) {
+                const timeSinceSave = Date.now() - timerState.savedAt;
+                const calculatedElapsed = Math.floor((Date.now() - timerState.startTime) / 1000);
+
+                console.log('✅ Same case detected! Timer was running!');
+                console.log('Time since save:', timeSinceSave + 'ms');
+                console.log('Calculated elapsed:', calculatedElapsed + 's');
+
+                startTime = timerState.startTime;
+                elapsedSeconds = calculatedElapsed;
+                isRunning = true;
+                currentCaseId = timerState.caseId;
+                currentCaseType = timerState.caseType;
+                currentQueueName = timerState.queueName;
+                caseStartTimestamp = timerState.caseStartTimestamp;
+
+                console.log('✅ Timer restored. Elapsed:', formatTime(elapsedSeconds));
+                console.log('====== END DEBUG ======');
+                return true;
+            }
+        } catch (e) {
+            console.error('Error restoring timer state:', e);
+        }
+        return false;
     }
 
-    // ⭐ TOGGLE HELP PANEL
-    function toggleHelpPanel() {
-        const helpPanel = createHelpPanel();
-        helpPanelOpen = !helpPanelOpen;
+    // ─── LOAD MINIMIZED STATE ─────────────────────────────────────────────────
+    function loadMinimizedState() {
+        return GM_getValue(MINIMIZED_STATE_KEY, 'false') === 'true';
+    }
 
-        if (helpPanelOpen) {
-            helpPanel.style.display = 'block';
-            console.log('✅ Help panel opened');
+    // ─── SAVE MINIMIZED STATE ─────────────────────────────────────────────────
+    function saveMinimizedState(minimized) {
+        GM_setValue(MINIMIZED_STATE_KEY, minimized ? 'true' : 'false');
+        isMinimized = minimized;
+    }
+
+    // ─── TOGGLE MINIMIZE ──────────────────────────────────────────────────────
+    function toggleMinimize() {
+        const panel = document.getElementById('aht-tracker-panel');
+        const contentArea = document.getElementById('aht-panel-content');
+        const minimizeBtn = document.getElementById('aht-btn-minimize');
+
+        if (!panel || !contentArea || !minimizeBtn) return;
+
+        isMinimized = !isMinimized;
+        saveMinimizedState(isMinimized);
+
+        if (isMinimized) {
+            // Minimize
+            contentArea.style.display = 'none';
+            minimizeBtn.textContent = '📍';
+            minimizeBtn.title = 'Expand Panel';
+            panel.style.width = '280px';
+            panel.style.height = 'auto';
         } else {
-            helpPanel.style.display = 'none';
-            console.log('✅ Help panel closed');
+            // Expand
+            contentArea.style.display = 'block';
+            minimizeBtn.textContent = '📌';
+            minimizeBtn.title = 'Minimize Panel';
         }
     }
 
-    // ⭐ CRITICAL: ensurePanelExists() - Smart panel management
-    function ensurePanelExists() {
-        let panel = document.getElementById('aht-tracker-panel');
+    // ─── EXCEL EXPORT ─────────────────────────────────────────────────────────
+    function exportToExcel() {
+        const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
+        if (log.length === 0) { alert('No cases logged yet. Nothing to export.'); return; }
 
-        // Panel already exists and is in DOM
-        if (panel && document.body && document.body.contains(panel)) {
-            return panel;
+        const stats = calcWeightedStats(log);
+        const wb    = XLSX.utils.book_new();
+
+        const caseRows = log.map((entry, idx) => ({
+            '#':               idx + 1,
+            'Case ID':         entry.caseId,
+            'Case Type':       entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon Fallback' : 'Non-Email',
+            'Queue Name':      entry.queueName || 'N/A',
+            'Start Time':      entry.startTime  ? new Date(entry.startTime).toLocaleString()  : 'N/A',
+            'End Time':        entry.timestamp  ? new Date(entry.timestamp).toLocaleString()  : 'N/A',
+            'AHT (mm:ss)':     entry.formatted,
+            'AHT (minutes)':   secondsToMinutes(entry.duration),
+            'Goal (minutes)':  secondsToMinutes(entry.goal),
+            'DAG %':           parseFloat(entry.dag),
+            'DAG Status':      parseFloat(entry.dag) >= 100 ? 'Achieved' : parseFloat(entry.dag) >= 80 ? 'Near Goal' : 'Below Goal'
+        }));
+        const ws1 = XLSX.utils.json_to_sheet(caseRows);
+        ws1['!cols'] = [
+            {wch:4},{wch:18},{wch:16},{wch:28},
+            {wch:22},{wch:22},{wch:12},{wch:14},
+            {wch:14},{wch:10},{wch:14}
+        ];
+        XLSX.utils.book_append_sheet(wb, ws1, 'Case Log');
+
+        const summaryRows = [
+            { 'Metric': 'Export Date',                         'Value': new Date().toLocaleString() },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── OVERALL (CASE-COUNT WEIGHTED) ──', 'Value': '' },
+            { 'Metric': 'Total Cases',                         'Value': stats.totalCases },
+            { 'Metric': 'Email Cases',                         'Value': stats.emailCount },
+            { 'Metric': 'Non-Email Cases',                     'Value': stats.nonEmailCount },
+            { 'Metric': 'Photon Fallback Cases',               'Value': stats.photonCount },
+            { 'Metric': 'Email Weight %',                      'Value': stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': 'Non-Email Weight %',                  'Value': stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': 'Photon Weight %',                     'Value': stats.totalCases > 0 ? ((stats.photonCount / stats.totalCases) * 100).toFixed(1) + '%' : 'N/A' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': 'Weighted Goal AHT (min)',             'Value': secondsToMinutes(stats.weightedGoalAHT) },
+            { 'Metric': 'Weighted Achieved AHT (min)',         'Value': secondsToMinutes(stats.weightedAchievedAHT) },
+            { 'Metric': 'Weighted DAG %',                      'Value': parseFloat(stats.weightedDAG) },
+            { 'Metric': 'Weighted DAG Status',                 'Value': parseFloat(stats.weightedDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': 'Total Goal AHT (by case count)',      'Value': secondsToMinutes(stats.totalGoalAHT) },
+            { 'Metric': 'Total Achieved AHT (by case count)',  'Value': secondsToMinutes(stats.totalAchievedAHT) },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── EMAIL CASES ──',                   'Value': '' },
+            { 'Metric': 'Email Goal (min)',                    'Value': 4.5 },
+            { 'Metric': 'Avg Email AHT (min)',                 'Value': stats.avgEmail    !== 0 ? secondsToMinutes(stats.avgEmail)    : 'N/A' },
+            { 'Metric': 'Email DAG %',                         'Value': stats.emailDAG    !== null ? parseFloat(stats.emailDAG)          : 'N/A' },
+            { 'Metric': 'Email DAG Status',                    'Value': stats.emailDAG    !== null ? (parseFloat(stats.emailDAG)    >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── NON-EMAIL CASES ──',               'Value': '' },
+            { 'Metric': 'Non-Email Goal (min)',                'Value': 8.0 },
+            { 'Metric': 'Avg Non-Email AHT (min)',             'Value': stats.avgNonEmail !== 0 ? secondsToMinutes(stats.avgNonEmail) : 'N/A' },
+            { 'Metric': 'Non-Email DAG %',                     'Value': stats.nonEmailDAG !== null ? parseFloat(stats.nonEmailDAG)       : 'N/A' },
+            { 'Metric': 'Non-Email DAG Status',                'Value': stats.nonEmailDAG !== null ? (parseFloat(stats.nonEmailDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' },
+            { 'Metric': '',                                    'Value': '' },
+            { 'Metric': '── PHOTON FALLBACK CASES ──',         'Value': '' },
+            { 'Metric': 'Photon Goal (min)',                   'Value': 8.0 },
+            { 'Metric': 'Avg Photon AHT (min)',                'Value': stats.avgPhoton !== 0 ? secondsToMinutes(stats.avgPhoton) : 'N/A' },
+            { 'Metric': 'Photon DAG %',                        'Value': stats.photonDAG !== null ? parseFloat(stats.photonDAG)       : 'N/A' },
+            { 'Metric': 'Photon DAG Status',                   'Value': stats.photonDAG !== null ? (parseFloat(stats.photonDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗') : 'N/A' }
+        ];
+        const ws2 = XLSX.utils.json_to_sheet(summaryRows);
+        ws2['!cols'] = [{wch:35},{wch:25}];
+        XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
+
+        XLSX.writeFile(wb, `AHT_Log_${new Date().toISOString().slice(0,10)}.xlsx`);
+    }
+
+    // ─── BUTTON STYLE HELPER ──────────────────────────────────────────────────
+    function btnStyle(bg, large = false) {
+        if (large) {
+            return `background:${bg};color:#fff;border:none;border-radius:8px;padding:12px 14px;cursor:pointer;font-size:13px;font-weight:bold;flex:1;`;
         }
+        return `background:${bg};color:#fff;border:none;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;font-weight:bold;`;
+    }
 
-        // Remove old orphaned panel
-        if (panel) panel.remove();
+    // ─── LOAD POSITION AND SIZE ───────────────────────────────────────────────
+    function loadPanelState() {
+        const position = JSON.parse(GM_getValue(POSITION_STORAGE_KEY, '{"bottom":"20px","right":"20px"}'));
+        const size = JSON.parse(GM_getValue(SIZE_STORAGE_KEY, '{"width":"260px","height":"auto"}'));
+        return { position, size };
+    }
 
-        // Wait for body if needed
-        if (!document.body) {
-            setTimeout(ensurePanelExists, 50);
-            return null;
+    // ─── SAVE POSITION AND SIZE ───────────────────────────────────────────────
+    function savePanelState(panel) {
+        const rect = panel.getBoundingClientRect();
+        const position = {
+            bottom: `${window.innerHeight - rect.bottom}px`,
+            right: `${window.innerWidth - rect.right}px`,
+            top: 'auto',
+            left: 'auto'
+        };
+        const size = {
+            width: `${rect.width}px`,
+            height: `${rect.height}px`
+        };
+        GM_setValue(POSITION_STORAGE_KEY, JSON.stringify(position));
+        GM_setValue(SIZE_STORAGE_KEY, JSON.stringify(size));
+    }
+
+    // ─── BUILD UI PANEL ───────────────────────────────────────────────────────
+    function buildPanel() {
+        const existing = document.getElementById('aht-tracker-panel');
+        if (existing) {
+            if (document.body && document.body.contains(existing)) return;
+            existing.remove();
         }
+        if (!document.body) return;
 
-        // Create new panel
         const { position, size } = loadPanelState();
+        isMinimized = loadMinimizedState();
 
-        panel = document.createElement('div');
+        const panel = document.createElement('div');
         panel.id = 'aht-tracker-panel';
+        panel.style.cssText = `
+            position:fixed; bottom:${position.bottom}; right:${position.right};
+            width:${size.width}; height:${size.height};
+            background:#1a1a2e; color:#eaeaea; border-radius:12px;
+            padding:14px 16px; font-family:Arial,sans-serif; font-size:13px;
+            box-shadow:0 4px 20px rgba(0,0,0,0.5); z-index:99999; user-select:none;
+            overflow-y:auto; overflow-x:hidden;
+        `;
 
         panel.innerHTML = `
-            <div id="aht-resize-handle"></div>
-            <div id="aht-panel-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding:4px 0;border-bottom:1px solid #333;user-select:none;width:100%;">
+            <div id="aht-panel-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;cursor:move;padding:4px 0;border-bottom:1px solid #333;">
                 <strong style="font-size:14px;">⏱ AHT Tracker</strong>
-                <span id="aht-case-type-badge" style="font-size:10px;font-weight:bold;padding:2px 7px;border-radius:10px;background:#2980b9;color:#fff;">Non-Email</span>
+                <div style="display:flex;gap:4px;align-items:center;">
+                    <span id="aht-case-type-badge" style="font-size:10px;font-weight:bold;padding:2px 7px;border-radius:10px;background:#2980b9;color:#fff;">Non-Email</span>
+                    <button id="aht-btn-minimize" style="background:none;border:none;color:#00d4ff;cursor:pointer;font-size:14px;padding:2px 4px;transition:all 0.2s ease;" title="Minimize Panel">📌</button>
+                </div>
             </div>
-            <div id="aht-case-label" style="font-size:10px;color:#aaa;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Case: ${currentCaseId}</div>
-            <div id="aht-queue-label" style="font-size:10px;color:#888;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Queue: detecting...</div>
-            <div id="aht-timer-display" style="font-size:32px;font-weight:bold;text-align:center;letter-spacing:2px;color:#00d4ff;margin:6px 0;">00:00</div>
-            <div id="aht-goal-label" style="text-align:center;font-size:10px;color:#888;margin-bottom:4px;">Goal: 8:00 (Non-Email)</div>
-            <div id="aht-status-bar" style="height:6px;border-radius:4px;background:#00d4ff;width:0%;transition:width 0.5s,background 0.5s;margin-bottom:8px;"></div>
-            <div id="aht-dag-display" style="text-align:center;font-size:12px;color:#aaa;margin-bottom:8px;">DAG: —</div>
-            <div id="aht-status-msg" style="text-align:center;font-size:11px;color:#aaa;margin-bottom:10px;">Press Start to begin tracking</div>
 
-            <div style="display:flex;gap:8px;justify-content:center;margin-bottom:8px;">
-                <button id="aht-btn-start" style="${btnStyle('#27ae60', true)}">▶ START</button>
-                <button id="aht-btn-stop"  style="${btnStyle('#e74c3c', true)}" disabled>⏹ STOP</button>
+            <div id="aht-panel-content" style="${isMinimized ? 'display:none;' : ''}">
+                <div id="aht-case-label" style="font-size:10px;color:#aaa;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    Case: ${currentCaseId}
+                </div>
+                <div id="aht-queue-label" style="font-size:10px;color:#888;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    Queue: detecting...
+                </div>
+                <div id="aht-timer-display" style="font-size:32px;font-weight:bold;text-align:center;letter-spacing:2px;color:#00d4ff;margin:6px 0;">
+                    00:00
+                </div>
+                <div id="aht-goal-label" style="text-align:center;font-size:10px;color:#888;margin-bottom:4px;">
+                    Goal: 8:00 (Non-Email)
+                </div>
+                <div id="aht-status-bar" style="height:6px;border-radius:4px;background:#00d4ff;width:0%;transition:width 0.5s,background 0.5s;margin-bottom:8px;"></div>
+                <div id="aht-dag-display" style="text-align:center;font-size:12px;color:#aaa;margin-bottom:8px;">DAG: —</div>
+                <div id="aht-status-msg" style="text-align:center;font-size:11px;color:#aaa;margin-bottom:10px;">Press Start to begin tracking</div>
+
+                <div style="display:flex;gap:8px;justify-content:center;margin-bottom:8px;">
+                    <button id="aht-btn-start" style="${btnStyle('#27ae60', true)}">▶ START</button>
+                    <button id="aht-btn-stop"  style="${btnStyle('#e74c3c', true)}" disabled>⏹ STOP</button>
+                </div>
+                <div style="display:flex;gap:6px;justify-content:center;margin-bottom:8px;">
+                    <button id="aht-btn-override-email"    style="${btnStyle('#8e44ad')}">📧 Email</button>
+                    <button id="aht-btn-override-nonemail" style="${btnStyle('#2c3e50')}">📁 Non-Email</button>
+                    <button id="aht-btn-override-photon"   style="${btnStyle('#c0392b')}">Photon</button>
+                </div>
+                <div style="display:flex;gap:6px;justify-content:center;margin-bottom:6px;">
+                    <button id="aht-btn-log"   style="${btnStyle('#2980b9')}">📋 View Log</button>
+                    <button id="aht-btn-help"  style="${btnStyle('#16a085')}">❓ Help</button>
+                </div>
+                <div style="display:flex;gap:6px;justify-content:center;margin-bottom:6px;">
+                    <button id="aht-btn-clear" style="${btnStyle('#7f8c8d')}">🗑 Clear</button>
+                    <button id="aht-btn-export" style="${btnStyle('#27ae60')}">📥 Export</button>
+                </div>
+                <div id="aht-log-panel" style="display:none;margin-top:10px;max-height:300px;overflow-y:auto;background:#0f0f1a;border-radius:8px;padding:8px;font-size:11px;color:#ccc;"></div>
+                <div id="aht-help-panel" style="display:none;margin-top:10px;max-height:300px;overflow-y:auto;background:#0f0f1a;border-radius:8px;padding:12px;font-size:11px;color:#ddd;line-height:1.6;"></div>
             </div>
-            <div style="display:flex;gap:6px;justify-content:center;margin-bottom:8px;">
-                <button id="aht-btn-override-email"    style="${btnStyle('#8e44ad')}">📧 Email</button>
-                <button id="aht-btn-override-nonemail" style="${btnStyle('#2c3e50')}">📁 Non-Email</button>
-                <button id="aht-btn-override-photon"   style="${btnStyle('#d35400')}">⚛️ Photon</button>
-            </div>
-            <div style="display:flex;gap:6px;justify-content:center;margin-bottom:6px;">
-                <button id="aht-btn-log"    style="${btnStyle('#2980b9')}">📋 Log</button>
-                <button id="aht-btn-export" style="${btnStyle('#27ae60')}">📥 Export</button>
-                <button id="aht-btn-clear"  style="${btnStyle('#7f8c8d')}">🗑 Clear</button>
-            </div>
-            <div style="display:flex;gap:6px;justify-content:center;">
-                <button id="aht-btn-help" style="${btnStyle('#16a085')}">💡 Help</button>
-            </div>
-            <div id="aht-log-panel" style="display:none;margin-top:10px;max-height:400px;overflow-y:auto;background:#0f0f1a;border-radius:8px;padding:8px;font-size:11px;color:#ccc;"></div>
+
+            <div id="aht-resize-handle" style="position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg, transparent 50%, #00d4ff 50%);border-radius:0 0 12px 0;opacity:0.3;"></div>
         `;
 
-        // Apply position and size with inline !important styles
-        let positionCSS = '';
-        if (position.left !== 'auto') {
-            positionCSS = `left: ${position.left} !important; top: ${position.top} !important;`;
-        } else {
-            positionCSS = `bottom: ${position.bottom} !important; right: ${position.right} !important;`;
-        }
-
-        panel.style.cssText = `
-            position: fixed !important;
-            ${positionCSS}
-            width: ${size.width} !important;
-            height: ${size.height} !important;
-        `;
-
-        // Append ONLY to body
         document.body.appendChild(panel);
-        console.log('✅ Panel created with position:', position, 'size:', size);
 
-        // ⭐ V2.28: Reset event attachment flag on new panel creation
-        eventsAttached = false;
+        const style = document.createElement('style');
+        style.textContent = `
+            #aht-btn-minimize:hover {
+                opacity: 0.7;
+                transform: scale(1.2);
+            }
+            #aht-btn-override-photon svg {
+                stroke: currentColor;
+                transition: all 0.2s ease;
+            }
+            #aht-btn-override-photon:hover svg {
+                filter: brightness(1.2);
+            }
+        `;
+        document.head.appendChild(style);
+
+        setTimeout(() => {
+            const photonBtn = document.getElementById('aht-btn-override-photon');
+            if (photonBtn) {
+                photonBtn.innerHTML = getAtomSVG() + 'Photon';
+            }
+        }, 100);
 
         attachEvents();
         attachDragResize();
-        detectCaseType();
-        updateCaseTypeUI();
-
-        return panel;
+        refreshCaseType();
     }
 
-    // ⭐ Start continuous timer (for restored state)
-    function startContinuousTimer() {
-        if (timerInterval) clearInterval(timerInterval);
-        timerInterval = setInterval(() => {
-            elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
-            updateDisplay();
-            saveTimerState(); // ⭐ Save every second
-        }, 1000);
-    }
-
-    // ⭐ V2.28 FIXED RESIZE (With proper event reattachment)
+    // ─── DRAG AND RESIZE HANDLERS ─────────────────────────────────────────────
     function attachDragResize() {
         const panel = document.getElementById('aht-tracker-panel');
         const header = document.getElementById('aht-panel-header');
         const resizeHandle = document.getElementById('aht-resize-handle');
 
-        if (!panel || !header) {
-            console.error('❌ Panel or header not found');
-            return;
-        }
+        if (!panel || !header) return;
 
-        console.log('✅ V2.28: Attaching drag/resize handlers...');
-
-        // ⭐ DRAG FUNCTIONALITY
         header.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return;
+            // Don't drag if clicking on minimize button
+            if (e.target.id === 'aht-btn-minimize') return;
+
             isDragging = true;
-            const rect = panel.getBoundingClientRect();
-            dragOffsetX = e.clientX - rect.left;
-            dragOffsetY = e.clientY - rect.top;
-            panel.classList.add('dragging');
-            e.preventDefault();
+            dragOffsetX = e.clientX - panel.getBoundingClientRect().left;
+            dragOffsetY = e.clientY - panel.getBoundingClientRect().top;
+            header.style.opacity = '0.7';
         });
 
-        // ⭐ GLOBAL MOUSEMOVE
         document.addEventListener('mousemove', (e) => {
             if (isDragging) {
                 const newX = e.clientX - dragOffsetX;
                 const newY = e.clientY - dragOffsetY;
 
-                const maxX = window.innerWidth - panel.offsetWidth;
-                const maxY = window.innerHeight - panel.offsetHeight;
+                const rect = panel.getBoundingClientRect();
+                const maxX = window.innerWidth - rect.width;
+                const maxY = window.innerHeight - rect.height;
 
-                const clampedX = Math.max(0, Math.min(newX, maxX));
-                const clampedY = Math.max(0, Math.min(newY, maxY));
-
-                panel.style.left = clampedX + 'px';
-                panel.style.top = clampedY + 'px';
+                panel.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
+                panel.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
                 panel.style.bottom = 'auto';
                 panel.style.right = 'auto';
             }
 
             if (isResizing) {
-                const deltaX = e.clientX - resizeStartX;
-                const deltaY = e.clientY - resizeStartY;
-
-                const newWidth = Math.max(220, resizeStartWidth + deltaX);
-                const newHeight = Math.max(300, resizeStartHeight + deltaY);
-
+                const newWidth = Math.max(220, resizeStartWidth + (e.clientX - resizeStartX));
+                const newHeight = Math.max(300, resizeStartHeight + (e.clientY - resizeStartY));
                 panel.style.width = newWidth + 'px';
                 panel.style.height = newHeight + 'px';
             }
-        }, { passive: true });
+        });
 
-        // ⭐ GLOBAL MOUSEUP
         document.addEventListener('mouseup', (e) => {
             if (isDragging) {
                 isDragging = false;
-                panel.classList.remove('dragging');
+                header.style.opacity = '1';
                 savePanelState(panel);
             }
             if (isResizing) {
                 isResizing = false;
+                resizeHandle.style.opacity = '0.3';
                 savePanelState(panel);
             }
         });
 
-        // ⭐ RESIZE HANDLE
         if (resizeHandle) {
             resizeHandle.addEventListener('mousedown', (e) => {
-                if (e.button !== 0) return;
                 e.preventDefault();
-                e.stopPropagation();
                 isResizing = true;
                 resizeStartX = e.clientX;
                 resizeStartY = e.clientY;
-                resizeStartWidth = panel.offsetWidth;
-                resizeStartHeight = panel.offsetHeight;
+                const rect = panel.getBoundingClientRect();
+                resizeStartWidth = rect.width;
+                resizeStartHeight = rect.height;
                 resizeHandle.style.opacity = '1';
             });
         }
 
-        // ⭐ TOUCH SUPPORT
         header.addEventListener('touchstart', (e) => {
+            if (e.target.id === 'aht-btn-minimize') return;
             if (e.touches.length !== 1) return;
             isDragging = true;
-            const rect = panel.getBoundingClientRect();
-            dragOffsetX = e.touches[0].clientX - rect.left;
-            dragOffsetY = e.touches[0].clientY - rect.top;
+            dragOffsetX = e.touches[0].clientX - panel.getBoundingClientRect().left;
+            dragOffsetY = e.touches[0].clientY - panel.getBoundingClientRect().top;
         });
 
         document.addEventListener('touchmove', (e) => {
-            if (!isDragging || e.touches.length !== 1) return;
-
-            const newX = e.touches[0].clientX - dragOffsetX;
-            const newY = e.touches[0].clientY - dragOffsetY;
-
-            const maxX = window.innerWidth - panel.offsetWidth;
-            const maxY = window.innerHeight - panel.offsetHeight;
-
-            panel.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
-            panel.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
-            panel.style.bottom = 'auto';
-            panel.style.right = 'auto';
-        }, { passive: true });
+            if (isDragging && e.touches.length === 1) {
+                const newX = e.touches[0].clientX - dragOffsetX;
+                const newY = e.touches[0].clientY - dragOffsetY;
+                const rect = panel.getBoundingClientRect();
+                const maxX = window.innerWidth - rect.width;
+                const maxY = window.innerHeight - rect.height;
+                panel.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
+                panel.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
+                panel.style.bottom = 'auto';
+                panel.style.right = 'auto';
+            }
+        });
 
         document.addEventListener('touchend', () => {
             if (isDragging) {
@@ -822,14 +623,194 @@ Weighted DAG =
                 savePanelState(panel);
             }
         });
-
-        console.log('✅ All event listeners attached');
     }
 
-    // ⭐ V2.29 UPDATED: updateDisplay() with one-time notification state
+    // ─── DISPLAY HELP INSTRUCTIONS ────────────────────────────────────────────
+    function displayHelpInstructions() {
+        const helpPanel = document.getElementById('aht-help-panel');
+        const helpBtn = document.getElementById('aht-btn-help');
+
+        if (!helpPanel || !helpBtn) return;
+
+        if (helpPanelOpen) {
+            helpPanel.style.display = 'none';
+            helpPanelOpen = false;
+            helpBtn.style.opacity = '1';
+            return;
+        }
+
+        helpPanelOpen = true;
+        helpBtn.style.opacity = '0.7';
+
+        helpPanel.innerHTML = `
+            <div style="background:#16213e;border-radius:6px;padding:10px;margin-bottom:10px;border-left:4px solid #16a085;">
+                <div style="color:#16a085;font-weight:bold;font-size:12px;margin-bottom:4px;">📖 HOW TO USE AHT TRACKER</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🚀 GETTING STARTED</div>
+                <div style="color:#bbb;">1. The app automatically detects your case ID and queue type</div>
+                <div style="color:#bbb;">2. Click <strong>▶ START</strong> when you begin working on a case</div>
+                <div style="color:#bbb;">3. Click <strong>⏹ STOP</strong> to end the case and save your AHT</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📌 MINIMIZE/EXPAND PANEL</div>
+                <div style="color:#bbb;"><strong style="color:#2ecc71;">✓ Minimize:</strong> Click the 📌 button in the header to collapse the panel to just the header</div>
+                <div style="color:#bbb;"><strong style="color:#2ecc71;">✓ Expand:</strong> Click the 📍 button to expand the panel again</div>
+                <div style="color:#bbb;"><strong>Note:</strong> The minimize state is saved and persists across page refreshes!</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">Useful for keeping the interface clean while the timer continues running in the background.</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🔄 TIMER PERSISTENCE (SAME CASE ONLY)</div>
+                <div style="color:#bbb;"><strong style="color:#2ecc71;">✓ Auto-Resume (Same Case):</strong> If the page refreshes while tracking the SAME case, the timer automatically continues!</div>
+                <div style="color:#bbb;"><strong style="color:#e74c3c;">✗ Auto-Reset (Different Case):</strong> If you navigate to a DIFFERENT case, the timer resets to 00:00</div>
+                <div style="color:#bbb;"><strong>Example 1 (Same Case):</strong> Case #123 Timer 5:30 → Refresh → Timer continues at 5:31, 5:32...</div>
+                <div style="color:#bbb;"><strong>Example 2 (Different Case):</strong> Case #123 Timer 5:30 → Navigate to Case #456 → Timer resets to 00:00</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">The script compares the current case ID with the saved case ID to determine if the timer should resume or reset.</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 CASE TYPES & AUTO-DETECTION</div>
+                <div style="color:#bbb;"><span style="background:#8e44ad;padding:2px 6px;border-radius:4px;font-size:10px;">📧 Email</span> Goal: <strong>4:30</strong> for email queue cases</div>
+                <div style="color:#bbb;"><span style="background:#2980b9;padding:2px 6px;border-radius:4px;font-size:10px;">📁 Non-Email</span> Goal: <strong>8:00</strong> for other cases</div>
+                <div style="color:#bbb;"><span style="background:#c0392b;padding:2px 6px;border-radius:4px;font-size:10px;">⚛ Photon</span> Goal: <strong>8:00</strong> for Photon Fallback UnitOfWork (<code style="background:#000;padding:1px 3px;">entityType=UnitOfWork</code>)</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;"><strong>✓ Auto-Detected:</strong> Case type detected from URL parameters and queue name.</div>
+                <div style="color:#888;font-size:10px;"><strong>✓ UnitOfWork URLs:</strong> Any <code>?entityType=UnitOfWork</code> URL is immediately tagged as Photon Fallback.</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">⚙️ MANUAL OVERRIDE</div>
+                <div style="color:#bbb;"><strong>If queue is NOT detected automatically:</strong></div>
+                <div style="color:#bbb;">• Click <strong>📧 Email</strong> button if handling an email case</div>
+                <div style="color:#bbb;">• Click <strong>📁 Non-Email</strong> button if handling another case</div>
+                <div style="color:#bbb;">• Click <strong>⚛ Photon</strong> button if handling a Photon fallback case</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">This will manually set the case type and adjust the AHT goal accordingly.</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 MOVING & RESIZING</div>
+                <div style="color:#bbb;"><strong>💫 Drag:</strong> Click and drag the header bar to move the widget anywhere on screen</div>
+                <div style="color:#bbb;"><strong>📐 Resize:</strong> Click and drag the corner resize handle (bottom-right) to adjust size</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">Your position and size are saved automatically!</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📈 UNDERSTANDING DAG (Case-Count Weighted)</div>
+                <div style="color:#bbb;"><strong>Formula:</strong> (Weighted Goal AHT ÷ Weighted Achieved AHT) × 100</div>
+                <div style="color:#bbb;"><strong>Weighted Goal AHT</strong> = (Email Goal × Email Weight) + (Non-Email Goal × Non-Email Weight) + (Photon Goal × Photon Weight)</div>
+                <div style="color:#bbb;"><strong>Weighted Achieved AHT</strong> = (Avg Email AHT × Email Weight) + (Avg Non-Email AHT × Non-Email Weight) + (Avg Photon AHT × Photon Weight)</div>
+                <div style="color:#bbb;"><strong>Weight</strong> = Number of cases in category ÷ Total cases</div>
+                <div style="color:#bbb;"><strong>Example:</strong> 10 Email + 5 Non-Email + 3 Photon = Email 55%, Non-Email 27%, Photon 18%</div>
+                <div style="color:#2ecc71;margin-top:4px;"><strong>≥100%</strong> = Goal Achieved ✓</div>
+                <div style="color:#f39c12;"><strong>80-99%</strong> = Near Goal ⚠️</div>
+                <div style="color:#e74c3c;"><strong>&lt;80%</strong> = Below Goal ✗</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">Each case type is weighted by COUNT, not time spent!</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 KEY FEATURES</div>
+                <div style="color:#bbb;"><strong>📋 View Log:</strong> See session summary & recent cases</div>
+                <div style="color:#bbb;"><strong>📥 Export:</strong> Download all cases to Excel with calculations</div>
+                <div style="color:#bbb;"><strong>🗑 Clear:</strong> Erase all logged cases</div>
+                <div style="color:#bbb;"><strong>❓ Help:</strong> Display this guide</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">⏰ ALERTS & WARNINGS</div>
+                <div style="color:#f39c12;"><strong>⚠️ 75% Mark:</strong> Warning notification sent</div>
+                <div style="color:#e74c3c;"><strong>🚨 Goal Exceeded:</strong> Critical alert when time runs out</div>
+                <div style="color:#888;font-size:10px;margin-top:4px;">Real-time status updates and color-coded indicators</div>
+            </div>
+
+            <div style="background:#16213e;border-radius:6px;padding:8px;border-left:4px solid #2980b9;">
+                <div style="color:#2980b9;font-size:10px;"><strong>💡 TIP:</strong> Track each case individually for accurate AHT metrics. The overall weighted DAG considers equal weight to each case regardless of duration!</div>
+            </div>
+        `;
+
+        helpPanel.style.display = 'block';
+    }
+
+    // ─── REFRESH CASE TYPE UI ─────────────────────────────────────────────────
+    function refreshCaseType() {
+        detectCaseType();
+        updateCaseTypeUI();
+    }
+
+    function updateCaseTypeUI() {
+        const badge      = document.getElementById('aht-case-type-badge');
+        const goalLabel  = document.getElementById('aht-goal-label');
+        const queueLabel = document.getElementById('aht-queue-label');
+        if (!badge) return;
+        if (currentCaseType === 'email') {
+            badge.textContent = 'Email';
+            badge.style.background = '#8e44ad';
+            if (goalLabel) goalLabel.textContent = 'Goal: 4:30 (Email)';
+        } else if (currentCaseType === 'photon') {
+            badge.textContent = 'Photon Fallback';
+            badge.style.background = '#c0392b';
+            if (goalLabel) goalLabel.textContent = 'Goal: 8:00 (Photon)';
+        } else {
+            badge.textContent = 'Non-Email';
+            badge.style.background = '#2980b9';
+            if (goalLabel) goalLabel.textContent = 'Goal: 8:00 (Non-Email)';
+        }
+        if (queueLabel) queueLabel.textContent = currentQueueName ? `Queue: ${currentQueueName}` : 'Queue: not detected';
+    }
+
+    // ─── TIMER LOGIC ──────────────────────────────────────────────────────────
+    function startTimer() {
+        if (isRunning) return;
+        refreshCaseType();
+        isRunning = true;
+        caseStartTimestamp = new Date().toISOString();
+        startTime = Date.now() - (elapsedSeconds * 1000);
+        timerInterval = setInterval(() => {
+            elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+            updateDisplay();
+            saveTimerState();
+        }, 1000);
+        setButtonStates(true);
+        updateStatusMsg('🟢 Tracking...', '#2ecc71');
+        saveTimerState();
+    }
+
+    function stopTimer() {
+        clearInterval(timerInterval);
+        isRunning = false;
+        const dag = calcDAG(elapsedSeconds, currentCaseType);
+        saveLog(dag);
+        updateStatusMsg(`✅ Saved | DAG: ${dag}%`, '#00d4ff');
+        setButtonStates(false);
+        const startBtn = document.getElementById('aht-btn-start');
+        if (startBtn) startBtn.disabled = true;
+
+        GM_setValue(TIMER_STATE_KEY, JSON.stringify({ isRunning: false }));
+
+        setTimeout(() => {
+            elapsedSeconds = 0;
+            caseStartTimestamp = null;
+            currentCaseId = detectCaseId();
+            const display    = document.getElementById('aht-timer-display');
+            const bar        = document.getElementById('aht-status-bar');
+            const caseLabel  = document.getElementById('aht-case-label');
+            const dagDisplay = document.getElementById('aht-dag-display');
+            const btn        = document.getElementById('aht-btn-start');
+            if (display)    { display.textContent = '00:00'; display.style.color = '#00d4ff'; }
+            if (bar)        { bar.style.width = '0%'; bar.style.background = '#00d4ff'; }
+            if (caseLabel)  caseLabel.textContent = `Case: ${currentCaseId}`;
+            if (dagDisplay) dagDisplay.textContent = 'DAG: —';
+            if (btn)        btn.disabled = false;
+            updateStatusMsg('Press Start to begin tracking', '#aaa');
+            refreshCaseType();
+        }, 3000);
+    }
+
+    // ─── DISPLAY UPDATE ───────────────────────────────────────────────────────
     function updateDisplay() {
-        const display = document.getElementById('aht-timer-display');
-        const bar = document.getElementById('aht-status-bar');
+        const display    = document.getElementById('aht-timer-display');
+        const bar        = document.getElementById('aht-status-bar');
         const dagDisplay = document.getElementById('aht-dag-display');
         if (!display || !bar) return;
 
@@ -841,34 +822,23 @@ Weighted DAG =
 
         const dag = calcDAG(elapsedSeconds, currentCaseType);
         if (dag !== null && dagDisplay) {
-            const dagVal = parseFloat(dag);
+            const dagVal   = parseFloat(dag);
             const dagColor = dagVal >= 100 ? '#2ecc71' : dagVal >= 80 ? '#f39c12' : '#e74c3c';
             dagDisplay.textContent = `DAG: ${dag}%`;
             dagDisplay.style.color = dagColor;
         }
 
         const warningAt = goal * 0.75;
-
         if (elapsedSeconds >= goal) {
             display.style.color = '#e74c3c';
             bar.style.background = '#e74c3c';
-            updateStatusMsg('🚨 AHT Critical!', '#e74c3c');
-            // ⭐ V2.29: Send critical notification ONCE per timer session
-            if (!criticalNotificationSent) {
-                triggerNotification('critical');
-                criticalNotificationSent = true;
-                console.log('🚨 Critical notification sent');
-            }
+            updateStatusMsg('🚨 AHT Critical! Wrap up now.', '#e74c3c');
+            if (elapsedSeconds === Math.floor(goal)) triggerNotification('critical');
         } else if (elapsedSeconds >= warningAt) {
             display.style.color = '#f39c12';
             bar.style.background = '#f39c12';
-            updateStatusMsg('⚠️ Approaching goal', '#f39c12');
-            // ⭐ V2.29: Send warning notification ONCE per timer session
-            if (!warningNotificationSent) {
-                triggerNotification('warning');
-                warningNotificationSent = true;
-                console.log('⚠️ Warning notification sent');
-            }
+            updateStatusMsg('⚠️ Approaching AHT goal', '#f39c12');
+            if (elapsedSeconds === Math.floor(warningAt)) triggerNotification('warning');
         } else {
             display.style.color = '#00d4ff';
             bar.style.background = '#00d4ff';
@@ -881,27 +851,90 @@ Weighted DAG =
         if (el) { el.textContent = msg; el.style.color = color; }
     }
 
-    function updateCaseTypeUI() {
-        const badge = document.getElementById('aht-case-type-badge');
-        const goalLabel = document.getElementById('aht-goal-label');
-        const queueLabel = document.getElementById('aht-queue-label');
-        if (!badge) return;
-        if (currentCaseType === 'email') {
-            badge.textContent = 'Email';
-            badge.style.background = '#8e44ad';
-            if (goalLabel) goalLabel.textContent = 'Goal: 4:30 (Email)';
-        } else if (currentCaseType === 'photon') {
-            badge.textContent = 'Photon';
-            badge.style.background = '#d35400';
-            if (goalLabel) goalLabel.textContent = 'Goal: 8:00 (Photon)';
-        } else {
-            badge.textContent = 'Non-Email';
-            badge.style.background = '#2980b9';
-            if (goalLabel) goalLabel.textContent = 'Goal: 8:00 (Non-Email)';
-        }
-        if (queueLabel) queueLabel.textContent = currentQueueName ? `Queue: ${currentQueueName}` : 'Queue: not detected';
+    // ─── NOTIFICATIONS ────────────────────────────────────────────────────────
+    function triggerNotification(level) {
+        const typeLabel = currentCaseType === 'email' ? 'Email' : currentCaseType === 'photon' ? 'Photon Fallback' : 'Non-Email';
+        const goalStr = currentCaseType === 'email' ? '4.5 min' : '8 min';
+        const messages = {
+            warning:  { title: '⚠️ AHT Warning',  text: `Case ${currentCaseId} (${typeLabel}): 75% of ${goalStr} goal reached.` },
+            critical: { title: '🚨 AHT Critical', text: `Case ${currentCaseId} (${typeLabel}): Goal of ${goalStr} exceeded!` }
+        };
+        GM_notification({ title: messages[level].title, text: messages[level].text, timeout: 5000 });
     }
 
+    // ─── LOGGING ──────────────────────────────────────────────────────────────
+    function saveLog(dag) {
+        const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
+        log.push({
+            caseId:    currentCaseId,
+            caseType:  currentCaseType,
+            queueName: currentQueueName,
+            duration:  elapsedSeconds,
+            formatted: formatTime(elapsedSeconds),
+            goal:      AHT_GOALS[currentCaseType],
+            dag:       dag,
+            startTime: caseStartTimestamp,
+            timestamp: new Date().toISOString()
+        });
+        GM_setValue(STORAGE_KEY, JSON.stringify(log));
+    }
+
+    function renderLog() {
+        const logPanel = document.getElementById('aht-log-panel');
+        if (!logPanel) return;
+        const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
+        if (log.length === 0) { logPanel.innerHTML = '<em>No cases logged yet.</em>'; return; }
+
+        const stats    = calcWeightedStats(log);
+        const dagColor = (dag) => { const v = parseFloat(dag); return v >= 100 ? '#2ecc71' : v >= 80 ? '#f39c12' : '#e74c3c'; };
+
+        const rows = log.slice(-10).reverse().map(entry => {
+            const typeLabel = entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon' : 'Non-Email';
+            const typeBg = entry.caseType === 'email' ? '#8e44ad' : entry.caseType === 'photon' ? '#c0392b' : '#2980b9';
+            return `
+                <div style="border-bottom:1px solid #222;padding:4px 0;">
+                    <span style="font-weight:bold;">${entry.caseId}</span>
+                    <span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${typeBg};color:#fff;margin-left:4px;">
+                        ${typeLabel}
+                    </span><br>
+                    ⏱ ${entry.formatted} &nbsp;|&nbsp;
+                    <span style="color:${dagColor(entry.dag)}">DAG: ${entry.dag}%</span> &nbsp;|&nbsp;
+                    🕐 ${new Date(entry.timestamp).toLocaleTimeString()}
+                </div>
+            `;
+        }).join('');
+
+        logPanel.innerHTML = `
+            <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📊 Session Summary (Case-Count Weighted)</div>
+                <div style="color:#aaa;"><strong style="color:#fff;">Total Cases: ${stats.totalCases}</strong> (📧 ${stats.emailCount} | 📁 ${stats.nonEmailCount} | ⚛ ${stats.photonCount})</div>
+                <div style="color:#aaa;">📧 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.emailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | 📁 Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.nonEmailCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong> | ⚛ Weight: <strong style="color:#fff;">${stats.totalCases > 0 ? ((stats.photonCount / stats.totalCases) * 100).toFixed(1) : 0}%</strong></div>
+                ${stats.avgEmail    !== 0 ? `<div style="color:#aaa;">Avg Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgEmail))}</strong> | DAG: <span style="color:${dagColor(stats.emailDAG)}">${stats.emailDAG}%</span></div>` : ''}
+                ${stats.avgNonEmail !== 0 ? `<div style="color:#aaa;">Avg Non-Email: <strong style="color:#fff;">${formatTime(Math.round(stats.avgNonEmail))}</strong> | DAG: <span style="color:${dagColor(stats.nonEmailDAG)}">${stats.nonEmailDAG}%</span></div>` : ''}
+                ${stats.avgPhoton !== 0 ? `<div style="color:#aaa;">Avg Photon: <strong style="color:#fff;">${formatTime(Math.round(stats.avgPhoton))}</strong> | DAG: <span style="color:${dagColor(stats.photonDAG)}">${stats.photonDAG}%</span></div>` : ''}
+            </div>
+
+            <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">🎯 GOAL vs ACHIEVED (by Case Count)</div>
+                <div style="color:#aaa;">Total Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalGoalAHT))}</strong> (${stats.emailCount} × 4:30 + ${stats.nonEmailCount} × 8:00 + ${stats.photonCount} × 8:00)</div>
+                <div style="color:#aaa;">Total Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.totalAchievedAHT))}</strong></div>
+                <div style="color:#aaa;margin-top:6px;padding-top:6px;border-top:1px solid #333;">Weighted Goal AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedGoalAHT))}</strong></div>
+                <div style="color:#aaa;">Weighted Achieved AHT: <strong style="color:#fff;">${formatTime(Math.round(stats.weightedAchievedAHT))}</strong></div>
+                <div style="color:#aaa;margin-top:4px;">📊 Weighted DAG: <strong style="color:${parseFloat(stats.weightedDAG) >= 100 ? '#2ecc71' : '#f39c12'}">${stats.weightedDAG}%</strong></div>
+            </div>
+
+            <div style="color:#aaa;font-size:10px;margin-bottom:4px;">Last 10 cases:</div>
+            ${rows}
+            <div style="color:#888;font-size:9px;margin-top:12px;padding-top:8px;border-top:1px solid #222;line-height:1.5;">
+                📌 <strong style="color:#00d4ff;">Goal by Count</strong> = Total goals based on number of cases<br>
+                📌 <strong style="color:#00d4ff;">Achieved by Count</strong> = Total actual time spent on all cases<br>
+                📌 <strong style="color:#00d4ff;">Weighted</strong> = Proportional based on case distribution<br>
+                📌 <strong style="color:#00d4ff;">DAG Formula</strong> = (Weighted Goal ÷ Weighted Achieved) × 100
+            </div>
+        `;
+    }
+
+    // ─── BUTTON STATES ────────────────────────────────────────────────────────
     function setButtonStates(running) {
         const s = document.getElementById('aht-btn-start');
         const x = document.getElementById('aht-btn-stop');
@@ -909,196 +942,129 @@ Weighted DAG =
         if (x) x.disabled = !running;
     }
 
-    // ⭐ V2.29 UPDATED: startTimer() - Reset notification flags
-    function startTimer() {
-        if (isRunning) return;
-        detectCaseType();
-        isRunning = true;
-        caseStartTimestamp = new Date().toISOString();
-        startTime = Date.now() - (elapsedSeconds * 1000);
-
-        // ⭐ V2.29: Reset notification flags for new timer session
-        warningNotificationSent = false;
-        criticalNotificationSent = false;
-        console.log('🔄 Notification flags reset for new timer');
-
-        startContinuousTimer();
-        setButtonStates(true);
-        updateStatusMsg('🟢 Tracking...', '#2ecc71');
-    }
-
-    // ⭐ V2.29 UPDATED: stopTimer() - Reset notification flags
-    function stopTimer() {
-        clearInterval(timerInterval);
-        isRunning = false;
-
-        // ⭐ V2.29: Reset notification flags when stopping
-        warningNotificationSent = false;
-        criticalNotificationSent = false;
-
-        const dag = calcDAG(elapsedSeconds, currentCaseType);
-        const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
-        log.push({
-            caseId: currentCaseId, caseType: currentCaseType, queueName: currentQueueName,
-            duration: elapsedSeconds, formatted: formatTime(elapsedSeconds),
-            goal: AHT_GOALS[currentCaseType], dag: dag,
-            startTime: caseStartTimestamp, timestamp: new Date().toISOString()
-        });
-        GM_setValue(STORAGE_KEY, JSON.stringify(log));
-        saveTimerState();
-        updateStatusMsg(`✅ Saved | DAG: ${dag}%`, '#00d4ff');
-        setButtonStates(false);
-
-        setTimeout(() => {
-            elapsedSeconds = 0;
-            caseStartTimestamp = null;
-            currentCaseId = detectCaseId();
-            const display = document.getElementById('aht-timer-display');
-            const bar = document.getElementById('aht-status-bar');
-            const caseLabel = document.getElementById('aht-case-label');
-            const dagDisplay = document.getElementById('aht-dag-display');
-            const btn = document.getElementById('aht-btn-start');
-            if (display) { display.textContent = '00:00'; display.style.color = '#00d4ff'; }
-            if (bar) { bar.style.width = '0%'; bar.style.background = '#00d4ff'; }
-            if (caseLabel) caseLabel.textContent = `Case: ${currentCaseId}`;
-            if (dagDisplay) dagDisplay.textContent = 'DAG: —';
-            if (btn) btn.disabled = false;
-            updateStatusMsg('Press Start to begin tracking', '#aaa');
-            detectCaseType();
-            updateCaseTypeUI();
-        }, 3000);
-    }
-
+    // ─── EVENT LISTENERS ──────────────────────────────────────────────────────
     function attachEvents() {
-        const startBtn = document.getElementById('aht-btn-start');
-        const stopBtn = document.getElementById('aht-btn-stop');
-        const emailBtn = document.getElementById('aht-btn-override-email');
-        const nonEmailBtn = document.getElementById('aht-btn-override-nonemail');
-        const photonBtn = document.getElementById('aht-btn-override-photon');
-        const logBtn = document.getElementById('aht-btn-log');
-        const exportBtn = document.getElementById('aht-btn-export');
-        const clearBtn = document.getElementById('aht-btn-clear');
-        const helpBtn = document.getElementById('aht-btn-help');
+        document.getElementById('aht-btn-start').addEventListener('click', startTimer);
+        document.getElementById('aht-btn-stop').addEventListener('click', stopTimer);
 
-        if (startBtn) startBtn.addEventListener('click', startTimer);
-        if (stopBtn) stopBtn.addEventListener('click', stopTimer);
+        document.getElementById('aht-btn-minimize').addEventListener('click', toggleMinimize);
 
-        if (emailBtn) emailBtn.addEventListener('click', () => {
-            currentCaseType = 'email';
-            updateCaseTypeUI();
-            updateStatusMsg('📧 Email', '#8e44ad');
+        document.getElementById('aht-btn-override-email').addEventListener('click', () => {
+            currentCaseType = 'email'; currentQueueName = '(manual override)';
+            updateCaseTypeUI(); updateStatusMsg('📧 Set to Email manually', '#8e44ad');
+            saveTimerState();
+        });
+        document.getElementById('aht-btn-override-nonemail').addEventListener('click', () => {
+            currentCaseType = 'nonemail'; currentQueueName = '(manual override)';
+            updateCaseTypeUI(); updateStatusMsg('📁 Set to Non-Email manually', '#2980b9');
+            saveTimerState();
+        });
+        document.getElementById('aht-btn-override-photon').addEventListener('click', () => {
+            currentCaseType = 'photon'; currentQueueName = '(manual override - Photon Fallback)';
+            updateCaseTypeUI(); updateStatusMsg('⚛ Set to Photon Fallback manually', '#c0392b');
+            saveTimerState();
         });
 
-        if (nonEmailBtn) nonEmailBtn.addEventListener('click', () => {
-            currentCaseType = 'nonemail';
-            updateCaseTypeUI();
-            updateStatusMsg('📁 Non-Email', '#2980b9');
-        });
-
-        if (photonBtn) photonBtn.addEventListener('click', () => {
-            currentCaseType = 'photon';
-            updateCaseTypeUI();
-            updateStatusMsg('⚛️ Photon', '#d35400');
-        });
-
-        if (logBtn) {
-            logBtn.addEventListener('click', () => {
-                const logPanel = document.getElementById('aht-log-panel');
-                if (logPanel) {
-                    logPanel.style.display = logPanel.style.display === 'none' ? 'block' : 'none';
-                    if (logPanel.style.display === 'block') {
-                        const log = JSON.parse(GM_getValue(STORAGE_KEY, '[]'));
-                        const stats = calcWeightedStats(log);
-                        if (log.length > 0) {
-                            let html = `<div style="font-size:10px;margin-bottom:8px;border-bottom:1px solid #333;padding-bottom:8px;"><strong>Weighted DAG:</strong> ${stats.weightedDAG}%</div>`;
-
-                            html += `<div style="font-size:10px;margin-bottom:8px;border-bottom:1px solid #333;padding-bottom:8px;">
-                                <strong>Category DAG:</strong><br>
-                                📧 Email: ${stats.emailDAG ? stats.emailDAG + '%' : 'N/A'} (${stats.emailCount} cases)<br>
-                                📁 Non-Email: ${stats.nonEmailDAG ? stats.nonEmailDAG + '%' : 'N/A'} (${stats.nonEmailCount} cases)<br>
-                                ⚛️ Photon: ${stats.photonDAG ? stats.photonDAG + '%' : 'N/A'} (${stats.photonCount} cases)
-                            </div>`;
-
-                            html += log.slice(-10).reverse().map(e => `<div style="margin:4px 0;padding:4px;border-bottom:1px solid #333;font-size:9px;">${e.caseId} | ${e.formatted} | DAG: ${e.dag}%</div>`).join('');
-                            logPanel.innerHTML = html;
-                        }
-                    }
-                }
-            });
-        }
-
-        if (exportBtn) {
-            exportBtn.addEventListener('click', exportToExcel);
-        }
-
-        if (clearBtn) {
-            clearBtn.addEventListener('click', () => {
-                if (confirm('🗑 Clear all AHT logs? This cannot be undone.')) {
-                    GM_setValue(STORAGE_KEY, '[]');
-                    const logPanel = document.getElementById('aht-log-panel');
-                    if (logPanel) {
-                        logPanel.innerHTML = '<em style="color:#aaa;">All logs cleared.</em>';
-                    }
-                    updateStatusMsg('✅ Logs cleared', '#2ecc71');
-                }
-            });
-        }
-
-        if (helpBtn) {
-            helpBtn.addEventListener('click', () => {
-                toggleHelpPanel();
-            });
-        }
-    }
-
-    // ⭐ AGGRESSIVE PANEL CHECKER - Every 200ms
-    function startPanelChecker() {
-        if (panelCheckerInterval) clearInterval(panelCheckerInterval);
-
-        panelCheckerInterval = setInterval(() => {
-            try {
-                ensurePanelExists();
-            } catch (e) {
-                console.error('Panel checker error:', e);
+        document.getElementById('aht-btn-log').addEventListener('click', () => {
+            const lp = document.getElementById('aht-log-panel');
+            if (!lp) return;
+            const hp = document.getElementById('aht-help-panel');
+            if (hp && hp.style.display === 'block') {
+                hp.style.display = 'none';
+                helpPanelOpen = false;
+                const helpBtn = document.getElementById('aht-btn-help');
+                if (helpBtn) helpBtn.style.opacity = '1';
             }
-        }, 200);
+            if (lp.style.display === 'none') { renderLog(); lp.style.display = 'block'; }
+            else lp.style.display = 'none';
+        });
+
+        document.getElementById('aht-btn-help').addEventListener('click', () => {
+            const lp = document.getElementById('aht-log-panel');
+            if (lp && lp.style.display === 'block') {
+                lp.style.display = 'none';
+            }
+            displayHelpInstructions();
+        });
+
+        document.getElementById('aht-btn-clear').addEventListener('click', () => {
+            if (confirm('Clear all AHT logs?')) {
+                GM_setValue(STORAGE_KEY, '[]');
+                const lp = document.getElementById('aht-log-panel');
+                if (lp) lp.innerHTML = '<em>Log cleared.</em>';
+            }
+        });
+
+        document.getElementById('aht-btn-export').addEventListener('click', exportToExcel);
     }
 
-    // ⭐ V2.28: INITIALIZE WITH TIMER RESTORATION
-    function init() {
-        console.log('🚀 AHT Tracker v2.29 initializing...');
+    // ─── SPA NAVIGATION + DEBOUNCED PANEL SURVIVAL ───────────────────────────
+    let lastUrl = location.href;
 
-        // Try to restore timer FIRST before creating panel
-        const timerRestored = restoreTimerState();
+    function schedulePanelRebuild() {
+        if (rebuildTimeout) clearTimeout(rebuildTimeout);
+        rebuildTimeout = setTimeout(() => {
+            if (!document.getElementById('aht-tracker-panel')) buildPanel();
+        }, 500);
+    }
 
-        // Create panel
-        ensurePanelExists();
-        startPanelChecker();
+    new MutationObserver(() => {
+        if (!document.getElementById('aht-tracker-panel')) {
+            schedulePanelRebuild();
+        }
 
-        // If timer was restored, start continuous timer
-        if (timerRestored) {
-            isRunning = true;
-            // ⭐ V2.29: Do NOT reset notification flags on restore
-            // This allows notifications to continue working if they haven't fired yet
-            startContinuousTimer();
-            setButtonStates(true);
-            updateStatusMsg('🟢 Tracking (Resumed)...', '#2ecc71');
-            console.log('✅ Timer resumed from refresh!');
+        const url = location.href;
+        if (url !== lastUrl) {
+            lastUrl = url;
+
+            if (!isRunning) {
+                currentCaseId = detectCaseId();
+                elapsedSeconds = 0;
+                caseStartTimestamp = null;
+                const caseLabel  = document.getElementById('aht-case-label');
+                const display    = document.getElementById('aht-timer-display');
+                const bar        = document.getElementById('aht-status-bar');
+                const dagDisplay = document.getElementById('aht-dag-display');
+                if (caseLabel)  caseLabel.textContent = `Case: ${currentCaseId}`;
+                if (display)    { display.textContent = '00:00'; display.style.color = '#00d4ff'; }
+                if (bar)        { bar.style.width = '0%'; bar.style.background = '#00d4ff'; }
+                if (dagDisplay) dagDisplay.textContent = 'DAG: —';
+            }
+
+            updateStatusMsg('Press Start to begin tracking', '#aaa');
+            setButtonStates(false);
+            setTimeout(refreshCaseType, 1500);
+        }
+    }).observe(document, { subtree: true, childList: true });
+
+    // ─── ROBUST INIT WITH TIMER RESTORATION ───────────────────────────────────
+    function tryBuildPanel() {
+        if (document.body) {
+            const timerRestored = restoreTimerState();
+
+            buildPanel();
+
+            if (timerRestored && isRunning) {
+                console.log('🚀 Resuming timer after restore...');
+                setTimeout(() => {
+                    timerInterval = setInterval(() => {
+                        elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+                        updateDisplay();
+                        saveTimerState();
+                    }, 1000);
+                    setButtonStates(true);
+                    updateDisplay();
+                    updateStatusMsg('🟢 Tracking (Resumed)...', '#2ecc71');
+                }, 500);
+            }
+        } else {
+            setTimeout(tryBuildPanel, 200);
         }
     }
 
-    if (document.body) {
-        init();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', tryBuildPanel);
     } else {
-        document.addEventListener('DOMContentLoaded', init);
-        setTimeout(init, 200);
+        tryBuildPanel();
     }
-
-    window.addEventListener('load', init);
-    window.addEventListener('beforeunload', () => {
-        console.log('💾 Saving state before unload...');
-        saveTimerState();
-        if (timerInterval) clearInterval(timerInterval);
-        if (panelCheckerInterval) clearInterval(panelCheckerInterval);
-    });
 })();
