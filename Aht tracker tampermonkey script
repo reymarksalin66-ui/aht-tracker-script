@@ -2385,4 +2385,2391 @@
         initialize();
     }
 
+})();// ==UserScript==
+// @name         OTC GWF AHT Tracker
+// @namespace    http://tampermonkey.net/
+// @version      3
+// @description  Phase 1 fixes + Case exclusion (per-instance) + UNDO (30s) + Daily/Weekly stats + RESPONSIVE LAYOUT + PROPER MINIMIZE + FIXED PHOTON CASE DETECTION
+// @author       sreymark
+// @match        https://paragon.amazon.com/hz/entity*
+// @match        https://paragon-na.amazon.com/hz/entity*
+// @match        https://paragon-eu.amazon.com/hz/entity*
+// @match        https://paragon-fe.amazon.com/hz/entity*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_notification
+// @grant        GM_xmlhttpRequest
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🔒 CRITICAL: URL & IFRAME VALIDATION (v3.3.4 FIX)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    // ✅ DO NOT RUN IN IFRAMES
+    if (window.self !== window.top) {
+        console.log('⚠️ [AHT TRACKER] Running in iframe, skipping initialization');
+        return;
+    }
+
+    // ✅ ONLY RUN ON SPECIFIC PAGES
+    const currentUrl = window.location.href;
+    const isValidPage = () => {
+        // Must have /hz/entity in URL
+        if (!currentUrl.includes('/hz/entity')) {
+            return false;
+        }
+
+        // OPTIONAL: Only run on UnitOfWork pages (remove if you want all entity types)
+        // Uncomment the line below if you ONLY want UnitOfWork pages:
+        // if (!currentUrl.includes('entityType=UnitOfWork')) return false;
+
+        return true;
+    };
+
+    if (!isValidPage()) {
+        console.log('⚠️ [AHT TRACKER] Page does not match required pattern, skipping');
+        return;
+    }
+
+    // ✅ PREVENT MULTIPLE SCRIPT EXECUTIONS
+    if (window.AHT_TRACKER_INITIALIZED) {
+        console.log('⚠️ [AHT TRACKER] Already initialized on this page, skipping');
+        return;
+    }
+    window.AHT_TRACKER_INITIALIZED = true;
+
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('  🚀 AHT TRACKER v3.3.4 - PHOTON CASE DETECTION FIXED');
+    console.log('═══════════════════════════════════════════════════════');
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 📋 CONFIGURATION OBJECT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    const CONFIG = {
+        storage: {
+            log: 'aht_case_log_v3',
+            position: 'aht_panel_position_v3',
+            size: 'aht_panel_size_v3',
+            timer: 'aht_timer_state_v3',
+            minimized: 'aht_panel_minimized_v3',
+            goals: 'aht_goals_v3',
+            excluded: 'aht_excluded_entries_v3'
+        },
+        defaults: {
+            email: 4.5 * 60,    // 270 seconds
+            nonemail: 8.0 * 60, // 480 seconds
+            photon: 8.0 * 60    // 480 seconds
+        },
+        patterns: {
+            email: /(claims-atoz-inquiries-sesu|trms-pi-claims-cs-escalation-claims|claims-asor-inquiries-sss)@amazon\.[a-z.]+/i,
+            photon: /(trms_pi_ph_uw_otc_fallback_uow|photon.*fallback|fallback.*photon)/i
+        },
+        timers: {
+            updateFrequency: 1000,
+            panelRebuild: 500,
+            caseChangeDelay: 1500,
+            undoWindow: 30000
+        },
+        ui: {
+            panelWidth: 260,
+            minWidth: 240,
+            minHeight: 320,
+            zIndex: 99999
+        }
+    };
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🔧 STORAGE VALIDATION LAYER
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function safeGetStorage(key, defaultValue = null) {
+        try {
+            const value = GM_getValue(key, null);
+
+            if (value === null || value === undefined) {
+                return defaultValue;
+            }
+
+            const parsed = JSON.parse(value);
+
+            if (key === CONFIG.storage.log || key === CONFIG.storage.excluded) {
+                if (!Array.isArray(parsed)) {
+                    console.warn(`⚠️ [VALIDATION] Storage key '${key}' is not an array, resetting`);
+                    return [];
+                }
+                if (parsed.length > 5000) {
+                    console.warn(`⚠️ [VALIDATION] ${key} exceeds 5000 entries, trimming`);
+                    return parsed.slice(-5000);
+                }
+            }
+
+            return parsed;
+        } catch (e) {
+            console.error(`❌ [STORAGE ERROR] Failed to retrieve '${key}':`, e.message);
+            return defaultValue;
+        }
+    }
+
+    function safeSetStorage(key, value) {
+        try {
+            let stringValue = typeof value === 'string' ? value : JSON.stringify(value);
+
+            JSON.parse(stringValue);
+
+            if (stringValue.length > 5000000) {
+                console.warn(`⚠️ [STORAGE] Data size: ${(stringValue.length / 1024 / 1024).toFixed(2)}MB`);
+            }
+
+            GM_setValue(key, stringValue);
+            return true;
+        } catch (e) {
+            console.error(`❌ [STORAGE SAVE ERROR] Failed to save '${key}':`, e.message);
+            return false;
+        }
+    }
+
+    function validateLogEntry(entry) {
+        if (!entry || typeof entry !== 'object') {
+            return null;
+        }
+
+        try {
+            return {
+                caseId: String(entry.caseId || 'UNKNOWN').substring(0, 100),
+                caseType: ['email', 'nonemail', 'photon'].includes(entry.caseType)
+                    ? entry.caseType
+                    : 'nonemail',
+                queueName: String(entry.queueName || '').substring(0, 200),
+                duration: Math.max(0, parseInt(entry.duration) || 0),
+                formatted: formatTime(Math.max(0, parseInt(entry.duration) || 0)),
+                goal: Math.max(60, parseInt(entry.goal) || CONFIG.defaults.nonemail),
+                dag: Math.max(0, Math.min(999.9, parseFloat(entry.dag) || 0)),
+                startTime: entry.startTime || new Date().toISOString(),
+                timestamp: entry.timestamp || new Date().toISOString()
+            };
+        } catch (e) {
+            console.warn('⚠️ [VALIDATION] Invalid log entry:', e.message);
+            return null;
+        }
+    }
+
+    function loadLogSafely() {
+        try {
+            const raw = safeGetStorage(CONFIG.storage.log, []);
+
+            if (!Array.isArray(raw)) {
+                console.warn('⚠️ Log storage is not an array');
+                return [];
+            }
+
+            const validated = raw
+                .map(validateLogEntry)
+                .filter(entry => entry !== null);
+
+            if (validated.length < raw.length) {
+                console.warn(`⚠️ Filtered out ${raw.length - validated.length} corrupted entries`);
+            }
+
+            return validated;
+        } catch (e) {
+            console.error('❌ Error loading log:', e);
+            return [];
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ⭐ SPECIFIC ENTRY EXCLUSION MANAGEMENT (v3.3)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function getEntryKey(caseId, timestamp) {
+        return `${caseId}|${timestamp}`;
+    }
+
+    function loadExcludedEntries() {
+        return safeGetStorage(CONFIG.storage.excluded, []) || [];
+    }
+
+    function saveExcludedEntries(excludedList) {
+        return safeSetStorage(CONFIG.storage.excluded, JSON.stringify(excludedList));
+    }
+
+    function toggleEntryExclusion(caseId, timestamp) {
+        const excluded = loadExcludedEntries();
+        const key = getEntryKey(caseId, timestamp);
+        const index = excluded.indexOf(key);
+
+        if (index > -1) {
+            excluded.splice(index, 1);
+            console.log(`✅ Entry ${key} now INCLUDED`);
+        } else {
+            excluded.push(key);
+            console.log(`🚫 Entry ${key} now EXCLUDED`);
+        }
+
+        saveExcludedEntries(excluded);
+        return excluded;
+    }
+
+    function isEntryExcluded(caseId, timestamp) {
+        const excluded = loadExcludedEntries();
+        const key = getEntryKey(caseId, timestamp);
+        return excluded.includes(key);
+    }
+
+    function getExcludedEntryCount() {
+        return loadExcludedEntries().length;
+    }
+
+    function findDuplicateCases(log) {
+        const caseIdMap = {};
+        const duplicates = [];
+
+        for (const entry of log) {
+            if (!caseIdMap[entry.caseId]) {
+                caseIdMap[entry.caseId] = [];
+            }
+            caseIdMap[entry.caseId].push(entry);
+        }
+
+        for (const [caseId, entries] of Object.entries(caseIdMap)) {
+            if (entries.length > 1) {
+                duplicates.push({
+                    caseId,
+                    count: entries.length,
+                    instances: entries
+                });
+            }
+        }
+
+        return duplicates;
+    }
+
+    function autoExcludeDuplicates() {
+        const log = loadLogSafely();
+        const duplicates = findDuplicateCases(log);
+
+        if (duplicates.length === 0) {
+            alert('✅ No duplicate cases found!');
+            return false;
+        }
+
+        let excluded = 0;
+        const excludedEntries = loadExcludedEntries();
+
+        for (const dup of duplicates) {
+            const instances = dup.instances.sort((a, b) =>
+                new Date(a.timestamp) - new Date(b.timestamp)
+            );
+
+            for (let i = 1; i < instances.length; i++) {
+                const entry = instances[i];
+                const key = getEntryKey(entry.caseId, entry.timestamp);
+                if (!excludedEntries.includes(key)) {
+                    excludedEntries.push(key);
+                    excluded++;
+                }
+            }
+        }
+
+        saveExcludedEntries(excludedEntries);
+
+        console.log(`✅ Auto-excluded ${excluded} duplicate entries (kept first instance of each)`);
+        return true;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🧹 CLEANUP HANDLERS REGISTRY
+    // ═════════════════════════════════════════════════════════════════════════
+
+    const CLEANUP_HANDLERS = [];
+
+    function registerCleanup(fn) {
+        if (typeof fn === 'function') {
+            CLEANUP_HANDLERS.push(fn);
+        }
+    }
+
+    function executeCleanup() {
+        console.log('🧹 [CLEANUP] Executing cleanup handlers...');
+        let executed = 0;
+        CLEANUP_HANDLERS.forEach((fn, idx) => {
+            try {
+                fn();
+                executed++;
+            } catch (e) {
+                console.error(`❌ [CLEANUP ${idx}]:`, e.message);
+            }
+        });
+        console.log(`✅ [CLEANUP] Executed ${executed}/${CLEANUP_HANDLERS.length} handlers`);
+    }
+
+    window.addEventListener('unload', executeCleanup);
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ⭐ UNDO HISTORY MANAGEMENT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    let undoTimer = null;
+    let lastDeletedEntry = null;
+    let undoButtonVisible = false;
+
+    function saveToUndoHistory(entry) {
+        try {
+            lastDeletedEntry = entry;
+            undoButtonVisible = true;
+
+            showUndoButton();
+
+            if (undoTimer) clearTimeout(undoTimer);
+            undoTimer = setTimeout(() => {
+                lastDeletedEntry = null;
+                undoButtonVisible = false;
+                hideUndoButton();
+                console.log('⏱ Undo window expired');
+            }, CONFIG.timers.undoWindow);
+
+            console.log(`💾 Undo buffer: ${entry.caseId} (${entry.formatted})`);
+        } catch (e) {
+            console.error('❌ Error saving to undo:', e);
+        }
+    }
+
+    function undoLastDelete() {
+        if (!lastDeletedEntry) {
+            alert('⚠️ Nothing to undo!');
+            return;
+        }
+
+        try {
+            const log = loadLogSafely();
+            log.push(lastDeletedEntry);
+
+            const success = safeSetStorage(CONFIG.storage.log, JSON.stringify(log));
+            if (success) {
+                console.log(`✅ UNDO: Restored ${lastDeletedEntry.caseId}`);
+                lastDeletedEntry = null;
+                undoButtonVisible = false;
+                hideUndoButton();
+
+                if (undoTimer) clearTimeout(undoTimer);
+
+                updateStatusMsg('✅ Restored!', '#2ecc71');
+                setTimeout(() => {
+                    updateStatusMsg('Tracking...', '#aaa');
+                }, 2000);
+
+                const logPanel = document.getElementById('aht-log-panel');
+                if (logPanel && logPanel.style.display !== 'none') {
+                    renderLog();
+                }
+            }
+        } catch (e) {
+            console.error('❌ Undo error:', e);
+            alert('Error restoring case.');
+        }
+    }
+
+    function showUndoButton() {
+        const undoBtn = document.getElementById('aht-btn-undo');
+        if (undoBtn) {
+            undoBtn.style.display = 'block';
+            undoBtn.style.animation = 'pulse 0.5s infinite';
+        }
+    }
+
+    function hideUndoButton() {
+        const undoBtn = document.getElementById('aht-btn-undo');
+        if (undoBtn) {
+            undoBtn.style.display = 'none';
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ⭐ DAILY/WEEKLY STATS CALCULATION
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function getTodayDate() {
+        return new Date().toISOString().slice(0, 10);
+    }
+
+    function getDateDaysAgo(days) {
+        const date = new Date();
+        date.setDate(date.getDate() - days);
+        return date.toISOString().slice(0, 10);
+    }
+
+    function getWeekStartDate() {
+        const now = new Date();
+        const dayOfWeek = now.getDay();
+        const diff = now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+        const date = new Date(now.setDate(diff));
+        return date.toISOString().slice(0, 10);
+    }
+
+    function getDateFromTimestamp(timestamp) {
+        return new Date(timestamp).toISOString().slice(0, 10);
+    }
+
+    function calcStatsForDateRange(log, startDate, endDate) {
+        if (!Array.isArray(log) || log.length === 0) return null;
+
+        const excluded = loadExcludedEntries();
+
+        const filteredLog = log.filter(entry => {
+            const entryDate = getDateFromTimestamp(entry.timestamp);
+            const key = getEntryKey(entry.caseId, entry.timestamp);
+            return entryDate >= startDate &&
+                   entryDate <= endDate &&
+                   !excluded.includes(key);
+        });
+
+        if (filteredLog.length === 0) return null;
+
+        let emailCount = 0, nonEmailCount = 0, photonCount = 0;
+        let emailTotal = 0, nonEmailTotal = 0, photonTotal = 0;
+
+        for (const entry of filteredLog) {
+            try {
+                const duration = Math.max(0, parseInt(entry.duration) || 0);
+
+                if (entry.caseType === 'email') {
+                    emailCount++;
+                    emailTotal += duration;
+                } else if (entry.caseType === 'photon') {
+                    photonCount++;
+                    photonTotal += duration;
+                } else {
+                    nonEmailCount++;
+                    nonEmailTotal += duration;
+                }
+            } catch (e) {
+                console.warn('⚠️ Error processing entry:', e);
+            }
+        }
+
+        const totalCases = emailCount + nonEmailCount + photonCount;
+        if (totalCases === 0) return null;
+
+        const emailWeight = emailCount / totalCases;
+        const nonEmailWeight = nonEmailCount / totalCases;
+        const photonWeight = photonCount / totalCases;
+
+        const avgEmailAHT = emailCount > 0 ? emailTotal / emailCount : 0;
+        const avgNonEmailAHT = nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : 0;
+        const avgPhotonAHT = photonCount > 0 ? photonTotal / photonCount : 0;
+
+        const emailDAG = emailCount > 0 ? ((AHT_GOALS.email / avgEmailAHT) * 100).toFixed(1) : null;
+        const nonEmailDAG = nonEmailCount > 0 ? ((AHT_GOALS.nonemail / avgNonEmailAHT) * 100).toFixed(1) : null;
+        const photonDAG = photonCount > 0 ? ((AHT_GOALS.photon / avgPhotonAHT) * 100).toFixed(1) : null;
+
+        const weightedGoalAHT = (AHT_GOALS.email * emailWeight) +
+                                (AHT_GOALS.nonemail * nonEmailWeight) +
+                                (AHT_GOALS.photon * photonWeight);
+        const weightedAchievedAHT = (avgEmailAHT * emailWeight) +
+                                    (avgNonEmailAHT * nonEmailWeight) +
+                                    (avgPhotonAHT * photonWeight);
+        const weightedDAG = weightedAchievedAHT > 0
+            ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1)
+            : null;
+
+        return {
+            startDate,
+            endDate,
+            caseCount: totalCases,
+            emailCount,
+            nonEmailCount,
+            photonCount,
+            avgEmailAHT,
+            avgNonEmailAHT,
+            avgPhotonAHT,
+            emailDAG,
+            nonEmailDAG,
+            photonDAG,
+            weightedDAG,
+            weightedGoalAHT,
+            weightedAchievedAHT,
+            totalDuration: emailTotal + nonEmailTotal + photonTotal
+        };
+    }
+
+    function getTodayStats() {
+        const log = loadLogSafely();
+        const today = getTodayDate();
+        return calcStatsForDateRange(log, today, today);
+    }
+
+    function getWeekStats() {
+        const log = loadLogSafely();
+        const weekStart = getWeekStartDate();
+        const today = getTodayDate();
+        return calcStatsForDateRange(log, weekStart, today);
+    }
+
+    function getMonthStats() {
+        const log = loadLogSafely();
+        const today = getTodayDate();
+        const monthStart = today.slice(0, 8) + '01';
+        return calcStatsForDateRange(log, monthStart, today);
+    }
+
+    function getLast7DaysStats() {
+        const log = loadLogSafely();
+        const today = getTodayDate();
+        const sevenDaysAgo = getDateDaysAgo(6);
+        return calcStatsForDateRange(log, sevenDaysAgo, today);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 📊 STATE VARIABLES
+    // ═════════════════════════════════════════════════════════════════════════
+
+    let AHT_GOALS = { ...CONFIG.defaults };
+
+    let timerInterval = null;
+    let mutationObserver = null;
+    let rebuildTimeout = null;
+    let urlCheckTimeout = null;
+
+    let startTime = null;
+    let elapsedSeconds = 0;
+    let isRunning = false;
+    let currentCaseId = detectCaseId();
+    let currentCaseType = 'nonemail';
+    let currentQueueName = '';
+    let caseStartTimestamp = null;
+
+    let isDragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+    let isResizing = false;
+    let resizeStartX = 0;
+    let resizeStartY = 0;
+    let resizeStartWidth = 0;
+    let resizeStartHeight = 0;
+
+    let helpPanelOpen = false;
+    let isMinimized = false;
+    let goalsEditorOpen = false;
+    let statsEditorOpen = false;
+    let pageLoadInitialized = false;
+    let manuallyStoppedOnCase = null;
+    let stoppedAtZero = false;
+    let shouldAutoStartOnLoad = true;
+    let lastUrl = location.href;
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 📦 DOM ELEMENT CACHE
+    // ═════════════════════════════════════════════════════════════════════════
+
+    const DOM = {
+        panel: null,
+        display: null,
+        bar: null,
+        dag: null,
+        statusMsg: null,
+        caseLabel: null,
+        queueLabel: null,
+        badge: null,
+        goalLabel: null,
+        minimizedDisplay: null
+    };
+
+    function cacheDOMElements() {
+        DOM.panel = document.getElementById('aht-tracker-panel');
+        DOM.display = document.getElementById('aht-timer-display');
+        DOM.bar = document.getElementById('aht-status-bar');
+        DOM.dag = document.getElementById('aht-dag-display');
+        DOM.statusMsg = document.getElementById('aht-status-msg');
+        DOM.caseLabel = document.getElementById('aht-case-label');
+        DOM.queueLabel = document.getElementById('aht-queue-label');
+        DOM.badge = document.getElementById('aht-case-type-badge');
+        DOM.goalLabel = document.getElementById('aht-goal-label');
+        DOM.minimizedDisplay = document.getElementById('aht-minimized-timer-display');
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🎯 GOALS MANAGEMENT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function loadGoals() {
+        try {
+            const stored = safeGetStorage(CONFIG.storage.goals, null);
+
+            if (stored && typeof stored === 'object') {
+                AHT_GOALS = {
+                    email: Math.max(60, parseInt(stored.email) || CONFIG.defaults.email),
+                    nonemail: Math.max(60, parseInt(stored.nonemail) || CONFIG.defaults.nonemail),
+                    photon: Math.max(60, parseInt(stored.photon) || CONFIG.defaults.photon)
+                };
+                console.log('✅ Custom AHT goals loaded:', AHT_GOALS);
+                return;
+            }
+        } catch (e) {
+            console.error('❌ Error loading goals:', e);
+        }
+
+        AHT_GOALS = { ...CONFIG.defaults };
+        console.log('ℹ️ Using default AHT goals');
+    }
+
+    function saveGoals() {
+        const success = safeSetStorage(CONFIG.storage.goals, JSON.stringify(AHT_GOALS));
+        if (success) {
+            console.log('💾 AHT goals saved');
+        }
+    }
+
+    function resetGoalsToDefault() {
+        AHT_GOALS = { ...CONFIG.defaults };
+        saveGoals();
+        updateGoalsUI();
+        updateCaseTypeUI();
+        if (DOM.display) DOM.display.style.color = '#00d4ff';
+        updateStatusMsg('✅ Goals reset', '#2ecc71');
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🧭 CASE DETECTION (v3.3.4 PHOTON FIX)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function detectCaseId() {
+        const detectors = [
+            () => new URLSearchParams(window.location.search).get('caseId'),
+            () => new URLSearchParams(window.location.search).get('id'),
+            () => {
+                const entityId = new URLSearchParams(window.location.search).get('entityId');
+                if (entityId) {
+                    // ✅ FIXED v3.3.4: URLSearchParams auto-decodes, so look for : not %3A
+                    const match = entityId.match(/^(\d+):/);
+                    if (match) {
+                        console.log(`✅ [PHOTON DETECTION] Case ID: ${match[1]} from entityId: ${entityId}`);
+                        return match[1];
+                    }
+                }
+                return null;
+            },
+            () => {
+                const match = window.location.href.match(/\/(cases|investigation|view-case)\/([A-Z0-9\-]+)/i);
+                return match ? match[2] : null;
+            }
+        ];
+
+        for (const detector of detectors) {
+            try {
+                const result = detector();
+                if (result && String(result).length > 3) {
+                    console.log(`✅ [CASE DETECTION] Found Case ID: ${result}`);
+                    return String(result).substring(0, 100);
+                }
+            } catch (e) {
+                console.warn('⚠️ Case detection error:', e);
+            }
+        }
+
+        const fallbackId = `UNKNOWN-${Date.now()}`;
+        console.warn(`⚠️ [CASE DETECTION] No case ID found, using fallback: ${fallbackId}`);
+        return fallbackId;
+    }
+
+    function detectCaseType() {
+        const entityType = new URLSearchParams(window.location.search).get('entityType');
+        if (entityType === 'UnitOfWork') {
+            currentCaseType = 'photon';
+            currentQueueName = 'Photon Fallback (UnitOfWork)';
+            console.log('✅ [CASE TYPE] UnitOfWork detected - PHOTON');
+            return currentCaseType;
+        }
+
+        const bodyText = document.body ? (document.body.innerText || '') : '';
+        const queuePatterns = [
+            /Queue[:\s]+([^\r\n]+)/i,
+            /Queue Name[:\s]+([^\r\n]+)/i,
+            /Assigned Queue[:\s]+([^\r\n]+)/i
+        ];
+
+        let queueName = '';
+        for (const pattern of queuePatterns) {
+            const match = bodyText.match(pattern);
+            if (match) {
+                queueName = match[1].trim().substring(0, 200);
+                break;
+            }
+        }
+        currentQueueName = queueName;
+
+        if (CONFIG.patterns.photon.test(currentQueueName)) {
+            currentCaseType = 'photon';
+            console.log('✅ [CASE TYPE] Queue matches PHOTON pattern:', currentQueueName);
+        } else if (CONFIG.patterns.email.test(currentQueueName)) {
+            currentCaseType = 'email';
+            console.log('✅ [CASE TYPE] Queue matches EMAIL pattern:', currentQueueName);
+        } else {
+            currentCaseType = 'nonemail';
+            console.log('✅ [CASE TYPE] Defaulting to NON-EMAIL. Queue:', currentQueueName);
+        }
+
+        return currentCaseType;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ⏱ TIME FORMATTING & CALCULATIONS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function formatTime(seconds) {
+        seconds = Math.max(0, parseInt(seconds) || 0);
+        const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+        const s = (seconds % 60).toString().padStart(2, '0');
+        return `${m}:${s}`;
+    }
+
+    function secondsToMinutes(seconds) {
+        return parseFloat((Math.max(0, parseInt(seconds) || 0) / 60).toFixed(2));
+    }
+
+    function calcDAG(actualSeconds, caseType) {
+        if (actualSeconds === 0) return null;
+        const dag = ((AHT_GOALS[caseType] / actualSeconds) * 100);
+        return Math.min(999.9, dag).toFixed(1);
+    }
+
+    function calcWeightedStats(log) {
+        if (!Array.isArray(log) || log.length === 0) return null;
+
+        const excluded = loadExcludedEntries();
+
+        const filteredLog = log.filter(entry => {
+            const key = getEntryKey(entry.caseId, entry.timestamp);
+            return !excluded.includes(key);
+        });
+
+        if (filteredLog.length === 0) {
+            console.warn('⚠️ All entries excluded');
+            return null;
+        }
+
+        let emailCount = 0, nonEmailCount = 0, photonCount = 0;
+        let emailTotal = 0, nonEmailTotal = 0, photonTotal = 0;
+
+        for (const entry of filteredLog) {
+            try {
+                const duration = Math.max(0, parseInt(entry.duration) || 0);
+
+                if (entry.caseType === 'email') {
+                    emailCount++;
+                    emailTotal += duration;
+                } else if (entry.caseType === 'photon') {
+                    photonCount++;
+                    photonTotal += duration;
+                } else {
+                    nonEmailCount++;
+                    nonEmailTotal += duration;
+                }
+            } catch (e) {
+                console.warn('⚠️ Error processing entry:', e);
+            }
+        }
+
+        const totalCases = emailCount + nonEmailCount + photonCount;
+        if (totalCases === 0) return null;
+
+        const emailWeight = emailCount / totalCases;
+        const nonEmailWeight = nonEmailCount / totalCases;
+        const photonWeight = photonCount / totalCases;
+
+        const avgEmailAHT = emailCount > 0 ? emailTotal / emailCount : 0;
+        const avgNonEmailAHT = nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : 0;
+        const avgPhotonAHT = photonCount > 0 ? photonTotal / photonCount : 0;
+
+        const emailDAG = emailCount > 0 ? ((AHT_GOALS.email / avgEmailAHT) * 100).toFixed(1) : null;
+        const nonEmailDAG = nonEmailCount > 0 ? ((AHT_GOALS.nonemail / avgNonEmailAHT) * 100).toFixed(1) : null;
+        const photonDAG = photonCount > 0 ? ((AHT_GOALS.photon / avgPhotonAHT) * 100).toFixed(1) : null;
+
+        const weightedGoalAHT = (AHT_GOALS.email * emailWeight) +
+                                (AHT_GOALS.nonemail * nonEmailWeight) +
+                                (AHT_GOALS.photon * photonWeight);
+        const weightedAchievedAHT = (avgEmailAHT * emailWeight) +
+                                    (avgNonEmailAHT * nonEmailWeight) +
+                                    (avgPhotonAHT * photonWeight);
+        const weightedDAG = weightedAchievedAHT > 0
+            ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1)
+            : null;
+
+        return {
+            weightedDAG, weightedGoalAHT, weightedAchievedAHT,
+            totalCases,
+            emailCount, nonEmailCount, photonCount,
+            avgEmail: avgEmailAHT,
+            avgNonEmail: avgNonEmailAHT,
+            avgPhoton: avgPhotonAHT,
+            emailDAG, nonEmailDAG, photonDAG,
+            excludedCount: log.length - filteredLog.length
+        };
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ⭐ TIMER MANAGEMENT (NO MEMORY LEAKS)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function startTimer() {
+        if (isRunning) return;
+
+        if (timerInterval !== null) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+        }
+
+        refreshCaseType();
+        isRunning = true;
+        caseStartTimestamp = new Date().toISOString();
+        startTime = Date.now() - (elapsedSeconds * 1000);
+
+        timerInterval = setInterval(() => {
+            try {
+                elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+                updateDisplay();
+                saveTimerState();
+            } catch (e) {
+                console.error('❌ Timer error:', e);
+            }
+        }, CONFIG.timers.updateFrequency);
+
+        registerCleanup(() => {
+            if (timerInterval !== null) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+        });
+
+        setButtonStates(true);
+        updateStatusMsg('🟢 Tracking...', '#2ecc71');
+        saveTimerState();
+        console.log('✅ Timer started');
+    }
+
+    function stopTimer() {
+        if (timerInterval !== null) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+        }
+
+        isRunning = false;
+        const dag = calcDAG(elapsedSeconds, currentCaseType);
+        saveLog(dag);
+
+        manuallyStoppedOnCase = currentCaseId;
+        stoppedAtZero = (elapsedSeconds === 0);
+
+        updateStatusMsg(`✅ Saved | DAG: ${dag}%`, '#00d4ff');
+        setButtonStates(false);
+        saveTimerState();
+
+        elapsedSeconds = 0;
+        caseStartTimestamp = null;
+
+        if (DOM.display) {
+            DOM.display.textContent = '00:00';
+            DOM.display.style.color = '#00d4ff';
+        }
+        if (DOM.bar) {
+            DOM.bar.style.width = '0%';
+            DOM.bar.style.background = '#00d4ff';
+        }
+        if (DOM.dag) DOM.dag.textContent = 'DAG: —';
+
+        updateStatusMsg('⏸ Timer paused', '#aaa');
+        console.log(`🛑 Timer stopped`);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 💾 TIMER STATE PERSISTENCE
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function saveTimerState() {
+        const timerState = {
+            isRunning: isRunning,
+            startTime: startTime,
+            caseId: currentCaseId,
+            caseType: currentCaseType,
+            queueName: currentQueueName,
+            caseStartTimestamp: caseStartTimestamp,
+            stoppedAtZero: stoppedAtZero,
+            savedAt: Date.now()
+        };
+        safeSetStorage(CONFIG.storage.timer, JSON.stringify(timerState));
+    }
+
+    function restoreTimerState() {
+        try {
+            const timerState = safeGetStorage(CONFIG.storage.timer, null);
+
+            if (!timerState) {
+                console.log('ℹ️ No saved timer state');
+                return false;
+            }
+
+            if (timerState.caseId !== currentCaseId) {
+                safeSetStorage(CONFIG.storage.timer, JSON.stringify({ isRunning: false }));
+                return false;
+            }
+
+            if (timerState.stoppedAtZero === true) {
+                safeSetStorage(CONFIG.storage.timer, JSON.stringify({ isRunning: false }));
+                shouldAutoStartOnLoad = false;
+                return false;
+            }
+
+            if (timerState.isRunning && timerState.startTime) {
+                const calculatedElapsed = Math.floor((Date.now() - timerState.startTime) / 1000);
+
+                startTime = timerState.startTime;
+                elapsedSeconds = calculatedElapsed;
+                isRunning = true;
+                currentCaseId = timerState.caseId;
+                currentCaseType = timerState.caseType;
+                currentQueueName = timerState.queueName;
+                caseStartTimestamp = timerState.caseStartTimestamp;
+                stoppedAtZero = false;
+                shouldAutoStartOnLoad = false;
+
+                console.log(`✅ Timer restored: ${formatTime(elapsedSeconds)}`);
+                return true;
+            }
+        } catch (e) {
+            console.error('❌ Error restoring timer:', e);
+        }
+        return false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 📊 DISPLAY UPDATES
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function updateDisplay() {
+        if (!DOM.display) cacheDOMElements();
+        if (!DOM.display) return;
+
+        try {
+            const goal = AHT_GOALS[currentCaseType];
+            const timeStr = formatTime(elapsedSeconds);
+            DOM.display.textContent = timeStr;
+
+            // Update minimized display if visible
+            if (DOM.minimizedDisplay) {
+                DOM.minimizedDisplay.textContent = timeStr;
+            }
+
+            const pct = Math.min((elapsedSeconds / goal) * 100, 100);
+            if (DOM.bar) DOM.bar.style.width = pct + '%';
+
+            const dag = calcDAG(elapsedSeconds, currentCaseType);
+            if (dag !== null && DOM.dag) {
+                const dagVal = parseFloat(dag);
+                const dagColor = dagVal >= 100 ? '#2ecc71' : dagVal >= 80 ? '#f39c12' : '#e74c3c';
+                DOM.dag.textContent = `DAG: ${dag}%`;
+                DOM.dag.style.color = dagColor;
+            }
+
+            const warningAt = goal * 0.75;
+            if (elapsedSeconds >= goal) {
+                DOM.display.style.color = '#e74c3c';
+                if (DOM.minimizedDisplay) DOM.minimizedDisplay.style.color = '#e74c3c';
+                if (DOM.bar) DOM.bar.style.background = '#e74c3c';
+                updateStatusMsg('🚨 AHT Critical!', '#e74c3c');
+            } else if (elapsedSeconds >= warningAt) {
+                DOM.display.style.color = '#f39c12';
+                if (DOM.minimizedDisplay) DOM.minimizedDisplay.style.color = '#f39c12';
+                if (DOM.bar) DOM.bar.style.background = '#f39c12';
+                updateStatusMsg('⚠️ Approaching goal', '#f39c12');
+            } else {
+                DOM.display.style.color = '#00d4ff';
+                if (DOM.minimizedDisplay) DOM.minimizedDisplay.style.color = '#00d4ff';
+                if (DOM.bar) DOM.bar.style.background = '#00d4ff';
+                updateStatusMsg('🟢 Tracking...', '#2ecc71');
+            }
+        } catch (e) {
+            console.error('❌ Display error:', e);
+        }
+    }
+
+    function updateStatusMsg(msg, color = '#aaa') {
+        if (!DOM.statusMsg) cacheDOMElements();
+        if (DOM.statusMsg) {
+            DOM.statusMsg.textContent = msg;
+            DOM.statusMsg.style.color = color;
+        }
+    }
+
+    function updateCaseTypeUI() {
+        if (!DOM.badge) cacheDOMElements();
+        if (!DOM.badge) return;
+
+        if (currentCaseType === 'email') {
+            DOM.badge.textContent = 'Email';
+            DOM.badge.style.background = '#8e44ad';
+            if (DOM.goalLabel) DOM.goalLabel.textContent = `Goal: ${formatTime(AHT_GOALS.email)} (Email)`;
+        } else if (currentCaseType === 'photon') {
+            DOM.badge.textContent = 'Photon';
+            DOM.badge.style.background = '#c0392b';
+            if (DOM.goalLabel) DOM.goalLabel.textContent = `Goal: ${formatTime(AHT_GOALS.photon)} (Photon)`;
+        } else {
+            DOM.badge.textContent = 'Non-Email';
+            DOM.badge.style.background = '#2980b9';
+            if (DOM.goalLabel) DOM.goalLabel.textContent = `Goal: ${formatTime(AHT_GOALS.nonemail)} (Non-Email)`;
+        }
+
+        if (DOM.queueLabel) {
+            DOM.queueLabel.textContent = currentQueueName
+                ? `Queue: ${currentQueueName}`
+                : 'Queue: detecting...';
+        }
+    }
+
+    function refreshCaseType() {
+        detectCaseType();
+        updateCaseTypeUI();
+    }
+
+    function setButtonStates(running) {
+        const btn = document.getElementById('aht-btn-stop');
+        if (btn) btn.disabled = !running;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 💾 LOGGING & EXPORT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function saveLog(dag) {
+        try {
+            const log = loadLogSafely();
+
+            const entry = validateLogEntry({
+                caseId: currentCaseId,
+                caseType: currentCaseType,
+                queueName: currentQueueName,
+                duration: elapsedSeconds,
+                formatted: formatTime(elapsedSeconds),
+                goal: AHT_GOALS[currentCaseType],
+                dag: dag,
+                startTime: caseStartTimestamp,
+                timestamp: new Date().toISOString()
+            });
+
+            if (entry) {
+                log.push(entry);
+                const success = safeSetStorage(CONFIG.storage.log, JSON.stringify(log));
+                if (success) {
+                    console.log(`✅ Case logged: ${entry.caseId}`);
+                }
+            }
+        } catch (e) {
+            console.error('❌ Error saving log:', e);
+        }
+    }
+
+    function renderStatsPanel() {
+        const statsPanel = document.getElementById('aht-stats-panel');
+        if (!statsPanel) return;
+
+        const todayStats = getTodayStats();
+        const weekStats = getWeekStats();
+        const monthStats = getMonthStats();
+        const last7DaysStats = getLast7DaysStats();
+
+        const dagColor = (dag) => {
+            if (!dag) return '#aaa';
+            const v = parseFloat(dag);
+            return v >= 100 ? '#2ecc71' : v >= 80 ? '#f39c12' : '#e74c3c';
+        };
+
+        const renderStatBox = (label, stats, timeRange) => {
+            if (!stats) {
+                return `
+                    <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;opacity:0.5;">
+                        <div style="color:#aaa;font-size:11px;font-weight:bold;">📊 ${label}</div>
+                        <div style="color:#888;font-size:10px;">No data for ${timeRange}</div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;border-left:4px solid #00d4ff;">
+                    <div style="color:#00d4ff;font-size:11px;font-weight:bold;">📊 ${label}</div>
+                    <div style="color:#aaa;font-size:10px;margin-top:4px;">
+                        <strong>Cases:</strong> 📧 ${stats.emailCount} | 📁 ${stats.nonEmailCount} | ⚛ ${stats.photonCount} = <strong>${stats.caseCount}</strong><br>
+                        <strong>Weighted DAG:</strong> <span style="color:${dagColor(stats.weightedDAG)};font-weight:bold;">${stats.weightedDAG}%</span><br>
+                        <strong>Avg AHT:</strong> ${formatTime(Math.round(stats.weightedAchievedAHT * 60))}
+                        ${stats.emailDAG ? `<br><strong>Email DAG:</strong> <span style="color:${dagColor(stats.emailDAG)}">${stats.emailDAG}%</span>` : ''}
+                        ${stats.nonEmailDAG ? ` | <strong>Non-Email:</strong> <span style="color:${dagColor(stats.nonEmailDAG)}">${stats.nonEmailDAG}%</span>` : ''}
+                        ${stats.photonDAG ? ` | <strong>Photon:</strong> <span style="color:${dagColor(stats.photonDAG)}">${stats.photonDAG}%</span>` : ''}
+                    </div>
+                </div>
+            `;
+        };
+
+        statsPanel.innerHTML = `
+            <div style="background:#0f0f1a;border-radius:8px;padding:8px;font-size:11px;color:#ddd;">
+                <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:10px;border-left:4px solid #16a085;">
+                    <div style="color:#16a085;font-weight:bold;font-size:12px;">📈 DAILY & WEEKLY STATS</div>
+                    <div style="color:#aaa;font-size:9px;">Only included entries (excluded entries not counted)</div>
+                </div>
+
+                ${renderStatBox('TODAY', todayStats, getTodayDate())}
+                ${renderStatBox('LAST 7 DAYS', last7DaysStats, getDateDaysAgo(6) + ' to ' + getTodayDate())}
+                ${renderStatBox('THIS WEEK', weekStats, getWeekStartDate() + ' to ' + getTodayDate())}
+                ${renderStatBox('THIS MONTH', monthStats, getTodayDate().slice(0, 8) + '01 to ' + getTodayDate())}
+            </div>
+        `;
+    }
+
+    function renderLog() {
+        const logPanel = document.getElementById('aht-log-panel');
+        if (!logPanel) return;
+
+        const log = loadLogSafely();
+        if (log.length === 0) {
+            logPanel.innerHTML = '<em>No cases logged yet.</em>';
+            return;
+        }
+
+        const excluded = loadExcludedEntries();
+        const stats = calcWeightedStats(log);
+        const duplicates = findDuplicateCases(log);
+
+        const dagColor = (dag) => {
+            const v = parseFloat(dag);
+            return v >= 100 ? '#2ecc71' : v >= 80 ? '#f39c12' : '#e74c3c';
+        };
+
+        let duplicateWarning = '';
+        if (duplicates.length > 0) {
+            const totalDups = duplicates.reduce((sum, d) => sum + (d.count - 1), 0);
+            duplicateWarning = `
+                <div style="background:#c0392b;border-radius:6px;padding:8px;margin-bottom:8px;border-left:4px solid #e74c3c;">
+                    <div style="color:#fff;font-size:11px;font-weight:bold;">⚠️ FOUND ${duplicates.length} DUPLICATE CASE(S) (${totalDups} extra)</div>
+                    <button id="aht-btn-auto-exclude-dups" style="background:#f1c40f;color:#000;border:none;border-radius:4px;padding:6px 10px;cursor:pointer;font-size:10px;font-weight:bold;margin-top:4px;" title="Automatically exclude duplicate entries (keeps first instance)">🔄 Auto-Exclude Dups</button>
+                </div>
+            `;
+        }
+
+        const rows = log.slice(-15).reverse().map((entry) => {
+            const key = getEntryKey(entry.caseId, entry.timestamp);
+            const isExcluded = excluded.includes(key);
+            const typeLabel = entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon' : 'Non-Email';
+            const typeBg = entry.caseType === 'email' ? '#8e44ad' : entry.caseType === 'photon' ? '#c0392b' : '#2980b9';
+
+            const rowStyle = isExcluded
+                ? 'border-bottom:1px solid #444;padding:4px 0;opacity:0.5;background:#0a0a14;'
+                : 'border-bottom:1px solid #222;padding:4px 0;';
+
+            const excludeBtn = `
+                <button id="exclude-${entry.caseId}-${entry.timestamp}" style="background:${isExcluded ? '#27ae60' : '#e74c3c'};color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:9px;font-weight:bold;" title="Exclude this instance">
+                    ${isExcluded ? '✓ Included' : '✗ Exclude'}
+                </button>
+            `;
+
+            const deleteBtn = `
+                <button id="delete-${entry.caseId}-${entry.timestamp}" style="background:#e74c3c;color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:9px;font-weight:bold;margin-left:2px;" title="Delete (30s undo)">
+                    🗑 Delete
+                </button>
+            `;
+
+            return `
+                <div style="${rowStyle}">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
+                        <div style="flex:1;">
+                            <span style="font-weight:bold;${isExcluded ? 'text-decoration:line-through;' : ''}">${entry.caseId}</span>
+                            <span style="font-size:9px;padding:1px 5px;border-radius:8px;background:${typeBg};color:#fff;margin-left:4px;">${typeLabel}</span>
+                            ${isExcluded ? '<span style="font-size:9px;color:#e74c3c;margin-left:4px;">⊘ EXCLUDED</span>' : ''}
+                        </div>
+                        <div>
+                            ${excludeBtn}
+                            ${deleteBtn}
+                        </div>
+                    </div>
+                    <div style="font-size:10px;color:#aaa;">
+                        ⏱ ${entry.formatted} | <span style="color:${dagColor(entry.dag)}">DAG: ${entry.dag}%</span> | ${new Date(entry.timestamp).toLocaleTimeString()}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        setTimeout(() => {
+            const autoDupBtn = document.getElementById('aht-btn-auto-exclude-dups');
+            if (autoDupBtn) {
+                autoDupBtn.addEventListener('click', () => {
+                    if (autoExcludeDuplicates()) {
+                        renderLog();
+                        updateStatusMsg('✅ Duplicates excluded!', '#2ecc71');
+                    }
+                });
+            }
+
+            log.slice(-15).reverse().forEach(entry => {
+                const key = getEntryKey(entry.caseId, entry.timestamp);
+
+                const excludeBtn = document.getElementById(`exclude-${entry.caseId}-${entry.timestamp}`);
+                if (excludeBtn) {
+                    excludeBtn.addEventListener('click', () => {
+                        toggleEntryExclusion(entry.caseId, entry.timestamp);
+                        renderLog();
+                    });
+                }
+
+                const deleteBtn = document.getElementById(`delete-${entry.caseId}-${entry.timestamp}`);
+                if (deleteBtn) {
+                    deleteBtn.addEventListener('click', () => {
+                        if (confirm(`Delete this entry? You have 30 seconds to undo.`)) {
+                            const updatedLog = log.filter(e =>
+                                !(e.caseId === entry.caseId && e.timestamp === entry.timestamp)
+                            );
+                            safeSetStorage(CONFIG.storage.log, JSON.stringify(updatedLog));
+                            saveToUndoHistory(entry);
+                            renderLog();
+                        }
+                    });
+                }
+            });
+        }, 100);
+
+        logPanel.innerHTML = `
+            <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📋 CASE LOG</div>
+                <div style="color:#aaa;font-size:10px;">
+                    <strong>Total:</strong> ${log.length} |
+                    <strong style="color:#e74c3c;">Excluded:</strong> ${excluded.length}
+                </div>
+                ${stats ? `<div style="color:#aaa;margin-top:4px;"><strong>Weighted DAG: <span style="color:${parseFloat(stats.weightedDAG) >= 100 ? '#2ecc71' : '#f39c12'}">${stats.weightedDAG}%</span></strong></div>` : ''}
+            </div>
+
+            ${duplicateWarning}
+
+            <div style="background:#0f0f1a;border-radius:6px;padding:8px;margin-bottom:8px;border-left:4px solid #f39c12;">
+                <div style="font-size:10px;color:#f39c12;font-weight:bold;">✗ Exclude / ✓ Include</div>
+                <div style="font-size:9px;color:#aaa;">Click button to exclude/include this specific entry (other instances of same case kept)</div>
+            </div>
+
+            <div style="color:#aaa;font-size:10px;margin-bottom:4px;">Last 15 cases (most recent first):</div>
+            ${rows}
+        `;
+    }
+
+    function exportToExcel() {
+        try {
+            const log = loadLogSafely();
+            if (log.length === 0) {
+                alert('No cases logged yet.');
+                return;
+            }
+
+            const excluded = loadExcludedEntries();
+            const stats = calcWeightedStats(log);
+            const wb = XLSX.utils.book_new();
+
+            const caseRows = log.map((entry, idx) => {
+                const key = getEntryKey(entry.caseId, entry.timestamp);
+                return {
+                    '#': idx + 1,
+                    'Date': new Date(entry.timestamp).toLocaleDateString(),
+                    'Time': new Date(entry.timestamp).toLocaleTimeString(),
+                    'Case ID': entry.caseId,
+                    'Type': entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon' : 'Non-Email',
+                    'AHT (mm:ss)': entry.formatted,
+                    'AHT (min)': secondsToMinutes(entry.duration),
+                    'DAG %': parseFloat(entry.dag),
+                    'Excluded?': excluded.includes(key) ? 'YES' : 'NO'
+                };
+            });
+
+            const ws1 = XLSX.utils.json_to_sheet(caseRows);
+            ws1['!cols'] = [
+                {wch:4},{wch:12},{wch:12},{wch:18},
+                {wch:12},{wch:12},{wch:10},{wch:10},{wch:10}
+            ];
+            XLSX.utils.book_append_sheet(wb, ws1, 'Case Log');
+
+            if (stats) {
+                const summaryRows = [
+                    { 'Metric': 'Export Date', 'Value': new Date().toLocaleString() },
+                    { 'Metric': '', 'Value': '' },
+                    { 'Metric': 'TOTAL CASES', 'Value': log.length },
+                    { 'Metric': 'Excluded Entries', 'Value': excluded.length },
+                    { 'Metric': 'Included Entries', 'Value': log.length - excluded.length },
+                    { 'Metric': '', 'Value': '' },
+                    { 'Metric': 'TODAY', 'Value': getTodayDate() },
+                    { 'Metric': 'Cases Today', 'Value': getTodayStats()?.caseCount || 0 },
+                    { 'Metric': 'Today DAG %', 'Value': getTodayStats()?.weightedDAG || 'N/A' },
+                    { 'Metric': '', 'Value': '' },
+                    { 'Metric': 'THIS WEEK', 'Value': getWeekStartDate() + ' to ' + getTodayDate() },
+                    { 'Metric': 'Week Cases', 'Value': getWeekStats()?.caseCount || 0 },
+                    { 'Metric': 'Week DAG %', 'Value': getWeekStats()?.weightedDAG || 'N/A' },
+                    { 'Metric': '', 'Value': '' },
+                    { 'Metric': 'OVERALL', 'Value': '' },
+                    { 'Metric': 'Total Cases (Included)', 'Value': stats.totalCases },
+                    { 'Metric': 'Weighted DAG %', 'Value': parseFloat(stats.weightedDAG) },
+                    { 'Metric': 'Status', 'Value': parseFloat(stats.weightedDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗' }
+                ];
+
+                const ws2 = XLSX.utils.json_to_sheet(summaryRows);
+                ws2['!cols'] = [{wch:35},{wch:20}];
+                XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
+            }
+
+            XLSX.writeFile(wb, `AHT_Log_${new Date().toISOString().slice(0,10)}.xlsx`);
+            console.log('✅ Excel export successful');
+            updateStatusMsg('✅ Exported to Excel', '#2ecc71');
+        } catch (e) {
+            console.error('❌ Export error:', e);
+            alert('Export failed.');
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🎨 UI BUILDERS & STYLES
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function loadPanelState() {
+        const position = safeGetStorage(CONFIG.storage.position, { bottom: "20px", right: "20px" });
+        const size = safeGetStorage(CONFIG.storage.size, { width: "260px", height: "auto" });
+        return {
+            position: position || { bottom: "20px", right: "20px" },
+            size: size || { width: "260px", height: "auto" }
+        };
+    }
+
+    function savePanelState(panel) {
+        if (!panel) return;
+        try {
+            const rect = panel.getBoundingClientRect();
+            const position = {
+                bottom: `${window.innerHeight - rect.bottom}px`,
+                right: `${window.innerWidth - rect.right}px`,
+                top: 'auto',
+                left: 'auto'
+            };
+            const size = {
+                width: `${rect.width}px`,
+                height: `${rect.height}px`
+            };
+            safeSetStorage(CONFIG.storage.position, JSON.stringify(position));
+            safeSetStorage(CONFIG.storage.size, JSON.stringify(size));
+        } catch (e) {
+            console.warn('⚠️ Error saving panel state:', e);
+        }
+    }
+
+    function loadMinimizedState() {
+        const stored = safeGetStorage(CONFIG.storage.minimized, false);
+        return stored === true || stored === 'true';
+    }
+
+    function saveMinimizedState(minimized) {
+        safeSetStorage(CONFIG.storage.minimized, minimized ? 'true' : 'false');
+        isMinimized = minimized;
+    }
+
+    function toggleMinimize() {
+        const panel = document.getElementById('aht-tracker-panel');
+        const header = document.getElementById('aht-panel-header');
+        const contentArea = document.getElementById('aht-panel-content');
+        const minimizeBtn = document.getElementById('aht-btn-minimize');
+        const minimizedSection = document.getElementById('aht-minimized-section');
+
+        if (!panel || !contentArea || !minimizeBtn || !header) return;
+
+        isMinimized = !isMinimized;
+        saveMinimizedState(isMinimized);
+
+        if (isMinimized) {
+            contentArea.style.display = 'none';
+            if (minimizedSection) minimizedSection.style.display = 'flex';
+            minimizeBtn.textContent = '📍 Expand';
+            header.style.borderRadius = '12px 12px 12px 12px';
+
+            panel.style.height = 'auto';
+            panel.style.minHeight = 'auto';
+        } else {
+            contentArea.style.display = 'flex';
+            if (minimizedSection) minimizedSection.style.display = 'none';
+            minimizeBtn.textContent = '📌 Min';
+            header.style.borderRadius = '12px 12px 0 0';
+
+            panel.style.height = '';
+            panel.style.minHeight = '320px';
+        }
+    }
+
+    function toggleGoalsEditor() {
+        const goalsPanel = document.getElementById('aht-goals-editor-panel');
+        if (!goalsPanel) return;
+
+        if (goalsEditorOpen) {
+            goalsPanel.style.display = 'none';
+            goalsEditorOpen = false;
+        } else {
+            goalsEditorOpen = true;
+            goalsPanel.style.display = 'block';
+            updateGoalsUI();
+        }
+    }
+
+    function toggleStatsPanel() {
+        const statsPanel = document.getElementById('aht-stats-panel');
+        if (!statsPanel) return;
+
+        if (statsEditorOpen) {
+            statsPanel.style.display = 'none';
+            statsEditorOpen = false;
+        } else {
+            statsEditorOpen = true;
+            statsPanel.style.display = 'block';
+            renderStatsPanel();
+        }
+    }
+
+    function updateGoalsUI() {
+        const emailInput = document.getElementById('aht-goal-email-input');
+        const nonEmailInput = document.getElementById('aht-goal-nonemail-input');
+        const photonInput = document.getElementById('aht-goal-photon-input');
+
+        if (emailInput) emailInput.value = (AHT_GOALS.email / 60).toFixed(2);
+        if (nonEmailInput) nonEmailInput.value = (AHT_GOALS.nonemail / 60).toFixed(2);
+        if (photonInput) photonInput.value = (AHT_GOALS.photon / 60).toFixed(2);
+    }
+
+    function saveGoalsFromInputs() {
+        try {
+            const emailVal = parseFloat(document.getElementById('aht-goal-email-input').value);
+            const nonEmailVal = parseFloat(document.getElementById('aht-goal-nonemail-input').value);
+            const photonVal = parseFloat(document.getElementById('aht-goal-photon-input').value);
+
+            if (isNaN(emailVal) || emailVal <= 0 || emailVal > 60) {
+                alert('⚠️ Email goal must be 0.1-60 minutes');
+                return false;
+            }
+            if (isNaN(nonEmailVal) || nonEmailVal <= 0 || nonEmailVal > 60) {
+                alert('⚠️ Non-Email goal must be 0.1-60 minutes');
+                return false;
+            }
+            if (isNaN(photonVal) || photonVal <= 0 || photonVal > 60) {
+                alert('⚠️ Photon goal must be 0.1-60 minutes');
+                return false;
+            }
+
+            AHT_GOALS.email = emailVal * 60;
+            AHT_GOALS.nonemail = nonEmailVal * 60;
+            AHT_GOALS.photon = photonVal * 60;
+
+            saveGoals();
+            updateCaseTypeUI();
+            updateStatusMsg('✅ Goals saved!', '#2ecc71');
+
+            return true;
+        } catch (e) {
+            console.error('❌ Error saving goals:', e);
+            return false;
+        }
+    }
+
+    function displayHelpInstructions() {
+        const helpPanel = document.getElementById('aht-help-panel');
+        const helpBtn = document.getElementById('aht-btn-help');
+
+        if (!helpPanel || !helpBtn) return;
+
+        if (helpPanelOpen) {
+            helpPanel.style.display = 'none';
+            helpPanelOpen = false;
+            helpBtn.style.opacity = '1';
+            return;
+        }
+
+        helpPanelOpen = true;
+        helpBtn.style.opacity = '0.7';
+
+        helpPanel.innerHTML = `
+            <div style="background:#16213e;border-radius:6px;padding:10px;margin-bottom:10px;border-left:4px solid #16a085;">
+                <div style="color:#16a085;font-weight:bold;font-size:12px;">📖 AHT TRACKER v3.3.4 GUIDE</div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">⭐ PHOTON CASE DETECTION (v3.3.4)</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Automatically detects Photon/UnitOfWork cases<br>
+                    • Case ID extracted from entityId parameter<br>
+                    • Example: 11904273252 from UOW entities<br>
+                    • Console logs show detection status
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">⭐ MINIMIZE PANEL</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Click <strong>📌 Min</strong> to minimize to header only<br>
+                    • Timer still visible in minimized mode<br>
+                    • Click <strong>📍 Expand</strong> to restore full panel<br>
+                    • Perfect for keeping track while working
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">⭐ EXCLUDE SPECIFIC ENTRIES</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Each case instance is tracked separately<br>
+                    • Click <strong>✗ Exclude</strong> to exclude ONLY that instance<br>
+                    • Other instances of same case still count<br>
+                    • Click <strong>✓ Include</strong> to add back
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">🚫 AUTO-EXCLUDE DUPLICATES</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • If you see duplicate warning<br>
+                    • Click <strong>🔄 Auto-Exclude Dups</strong><br>
+                    • Keeps first instance, excludes rest<br>
+                    • Save time for accidental re-opens
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">📊 DAILY STATS</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Click <strong>📊 Stats</strong> button<br>
+                    • See Today, Last 7 Days, Week, Month<br>
+                    • Only included entries counted<br>
+                    • Auto-updates in real-time
+                </div>
+            </div>
+
+            <div style="background:#16213e;border-radius:6px;padding:8px;border-left:4px solid #2980b9;margin-top:10px;">
+                <div style="color:#2980b9;font-size:10px;"><strong>💡 TIP:</strong> Check browser console for detailed detection logs!</div>
+            </div>
+        `;
+
+        helpPanel.style.display = 'block';
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🖼️ BUILD MAIN PANEL (RESPONSIVE + PROPER MINIMIZE)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function buildPanel() {
+        const existing = document.getElementById('aht-tracker-panel');
+        if (existing && document.body?.contains(existing)) return;
+        if (existing) existing.remove();
+        if (!document.body) return;
+
+        const { position, size } = loadPanelState();
+        isMinimized = loadMinimizedState();
+
+        const panel = document.createElement('div');
+        panel.id = 'aht-tracker-panel';
+        panel.style.cssText = `
+            position:fixed; bottom:${position.bottom}; right:${position.right};
+            width:${size.width}; height:${size.height};
+            min-width:240px; min-height:320px;
+            background:#1a1a2e; color:#eaeaea; border-radius:12px;
+            padding:0; font-family:Arial,sans-serif; font-size:13px;
+            box-shadow:0 4px 20px rgba(0,0,0,0.5); z-index:99999; user-select:none;
+            display:flex; flex-direction:column;
+            border:1px solid #333;
+            transition:all 0.3s ease;
+        `;
+
+        panel.innerHTML = `
+            <div id="aht-panel-header" style="
+                display:flex;
+                justify-content:space-between;
+                align-items:center;
+                padding:12px 14px;
+                border-bottom:1px solid #333;
+                cursor:move;
+                flex-shrink:0;
+                background:#0f0f1a;
+                border-radius:12px 12px 0 0;
+                ${isMinimized ? 'border-radius:12px 12px 12px 12px;' : ''}
+            ">
+                <strong style="font-size:14px;white-space:nowrap;">⏱ AHT v3.3.4</strong>
+                <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+                    <span id="aht-case-type-badge" style="
+                        font-size:10px;
+                        font-weight:bold;
+                        padding:3px 8px;
+                        border-radius:10px;
+                        background:#2980b9;
+                        color:#fff;
+                        white-space:nowrap;
+                    ">Non-Email</span>
+                    <button id="aht-btn-minimize" style="
+                        background:none;
+                        border:none;
+                        color:#00d4ff;
+                        cursor:pointer;
+                        font-size:12px;
+                        padding:4px 6px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                    " title="Minimize/Expand panel">📌 Min</button>
+                </div>
+            </div>
+
+            <!-- MINIMIZED DISPLAY (Only shows when minimized) -->
+            <div id="aht-minimized-section" style="
+                display:${isMinimized ? 'flex' : 'none'};
+                flex-direction:column;
+                align-items:center;
+                justify-content:center;
+                padding:8px 12px;
+                gap:4px;
+            ">
+                <div id="aht-minimized-timer-display" style="
+                    font-size:28px;
+                    font-weight:bold;
+                    letter-spacing:2px;
+                    color:#00d4ff;
+                    line-height:1;
+                ">00:00</div>
+                <div style="
+                    font-size:9px;
+                    color:#888;
+                    text-align:center;
+                ">Click expand to view details</div>
+            </div>
+
+            <div id="aht-panel-content" style="
+                padding:12px 14px;
+                overflow-y:auto;
+                overflow-x:hidden;
+                flex:1;
+                display:${isMinimized ? 'none' : 'flex'};
+                flex-direction:column;
+                gap:8px;
+            ">
+                <!-- Case Info Section -->
+                <div style="
+                    display:grid;
+                    grid-template-columns:1fr;
+                    gap:2px;
+                    font-size:9px;
+                ">
+                    <div id="aht-case-label" style="
+                        color:#aaa;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                        white-space:nowrap;
+                    ">Case: ${currentCaseId}</div>
+                    <div id="aht-queue-label" style="
+                        color:#888;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                        white-space:nowrap;
+                    ">Queue: detecting...</div>
+                </div>
+
+                <!-- Timer Section -->
+                <div style="
+                    display:grid;
+                    grid-template-columns:1fr;
+                    gap:6px;
+                    text-align:center;
+                    padding:4px 0;
+                    border:1px solid #333;
+                    border-radius:6px;
+                    background:#0f0f1a;
+                ">
+                    <div id="aht-timer-display" style="
+                        font-size:clamp(28px, 8vw, 36px);
+                        font-weight:bold;
+                        letter-spacing:3px;
+                        color:#00d4ff;
+                        line-height:1;
+                        margin:8px 0 2px 0;
+                    ">00:00</div>
+                    <div id="aht-goal-label" style="
+                        font-size:10px;
+                        color:#888;
+                        margin:0 0 4px 0;
+                    ">Goal: 8:00</div>
+                    <div id="aht-status-bar" style="
+                        height:6px;
+                        border-radius:4px;
+                        background:#00d4ff;
+                        width:0%;
+                        transition:width 0.5s;
+                        margin:0 8px 8px 8px;
+                    "></div>
+                    <div id="aht-dag-display" style="
+                        font-size:11px;
+                        color:#aaa;
+                        margin:0 0 6px 0;
+                    ">DAG: —</div>
+                </div>
+
+                <!-- Status Message -->
+                <div id="aht-status-msg" style="
+                    text-align:center;
+                    font-size:10px;
+                    color:#aaa;
+                    padding:4px;
+                    border-radius:4px;
+                    background:#16213e;
+                    min-height:18px;
+                ">🚀 Loading...</div>
+
+                <!-- Stop Button (Full Width) -->
+                <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:2px;">
+                    <button id="aht-btn-stop" style="
+                        background:#e74c3c;
+                        color:#fff;
+                        border:none;
+                        border-radius:6px;
+                        padding:10px 8px;
+                        cursor:pointer;
+                        font-size:12px;
+                        font-weight:bold;
+                        transition:background 0.3s;
+                        width:100%;
+                        box-sizing:border-box;
+                    " disabled title="Stop timer and save case">⏹ STOP</button>
+                </div>
+
+                <!-- Case Type Override Buttons (3-column grid) -->
+                <div style="
+                    display:grid;
+                    grid-template-columns:repeat(3, 1fr);
+                    gap:5px;
+                    margin-top:2px;
+                ">
+                    <button id="aht-btn-override-email" style="
+                        background:#8e44ad;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="Force mark as Email">📧 Email</button>
+                    <button id="aht-btn-override-nonemail" style="
+                        background:#2c3e50;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="Force mark as Non-Email">📁 Non-Email</button>
+                    <button id="aht-btn-override-photon" style="
+                        background:#c0392b;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="Force mark as Photon">⚛ Photon</button>
+                </div>
+
+                <!-- Undo Button (Conditional) -->
+                <div style="display:grid;grid-template-columns:1fr;gap:6px;">
+                    <button id="aht-btn-undo" style="
+                        background:#f1c40f;
+                        color:#000;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 8px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        display:none;
+                    " title="Undo last delete (30 seconds)">↶ UNDO</button>
+                </div>
+
+                <!-- Primary Action Buttons (3-column grid) -->
+                <div style="
+                    display:grid;
+                    grid-template-columns:repeat(3, 1fr);
+                    gap:5px;
+                    margin-top:2px;
+                ">
+                    <button id="aht-btn-log" style="
+                        background:#2980b9;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="View case log">📋 Log</button>
+                    <button id="aht-btn-stats" style="
+                        background:#16a085;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="View daily/weekly stats">📊 Stats</button>
+                    <button id="aht-btn-help" style="
+                        background:#27ae60;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="Show help guide">❓ Help</button>
+                </div>
+
+                <!-- Secondary Action Buttons (3-column grid) -->
+                <div style="
+                    display:grid;
+                    grid-template-columns:repeat(3, 1fr);
+                    gap:5px;
+                ">
+                    <button id="aht-btn-edit-goals" style="
+                        background:#f39c12;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="Edit AHT goals">⚙️ Goals</button>
+                    <button id="aht-btn-clear" style="
+                        background:#7f8c8d;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="Clear all logs">🗑 Clear</button>
+                    <button id="aht-btn-export" style="
+                        background:#27ae60;
+                        color:#fff;
+                        border:none;
+                        border-radius:5px;
+                        padding:6px 4px;
+                        cursor:pointer;
+                        font-size:10px;
+                        font-weight:bold;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    " title="Export to Excel">📥 Export</button>
+                </div>
+
+                <!-- Stats Panel -->
+                <div id="aht-stats-panel" style="
+                    display:none;
+                    max-height:300px;
+                    overflow-y:auto;
+                    background:#0f0f1a;
+                    border-radius:6px;
+                    padding:8px;
+                    font-size:10px;
+                    border:1px solid #333;
+                    margin-top:6px;
+                "></div>
+
+                <!-- Goals Editor -->
+                <div id="aht-goals-editor-panel" style="
+                    display:none;
+                    background:#0f0f1a;
+                    border-radius:6px;
+                    padding:10px;
+                    border:2px solid #f39c12;
+                    margin-top:6px;
+                ">
+                    <div style="
+                        color:#f39c12;
+                        font-weight:bold;
+                        font-size:11px;
+                        margin-bottom:8px;
+                    ">⚙️ EDIT GOALS</div>
+                    <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+                        <div>
+                            <label style="
+                                color:#00d4ff;
+                                font-size:9px;
+                                display:block;
+                                margin-bottom:3px;
+                                font-weight:bold;
+                            ">Email (min):</label>
+                            <input id="aht-goal-email-input" type="number" step="0.1" min="0.1" max="60" style="
+                                width:100%;
+                                padding:5px;
+                                border:1px solid #444;
+                                border-radius:4px;
+                                background:#1a1a2e;
+                                color:#00d4ff;
+                                font-size:10px;
+                                box-sizing:border-box;
+                            "/>
+                        </div>
+                        <div>
+                            <label style="
+                                color:#2980b9;
+                                font-size:9px;
+                                display:block;
+                                margin-bottom:3px;
+                                font-weight:bold;
+                            ">Non-Email (min):</label>
+                            <input id="aht-goal-nonemail-input" type="number" step="0.1" min="0.1" max="60" style="
+                                width:100%;
+                                padding:5px;
+                                border:1px solid #444;
+                                border-radius:4px;
+                                background:#1a1a2e;
+                                color:#2980b9;
+                                font-size:10px;
+                                box-sizing:border-box;
+                            "/>
+                        </div>
+                        <div>
+                            <label style="
+                                color:#c0392b;
+                                font-size:9px;
+                                display:block;
+                                margin-bottom:3px;
+                                font-weight:bold;
+                            ">Photon (min):</label>
+                            <input id="aht-goal-photon-input" type="number" step="0.1" min="0.1" max="60" style="
+                                width:100%;
+                                padding:5px;
+                                border:1px solid #444;
+                                border-radius:4px;
+                                background:#1a1a2e;
+                                color:#c0392b;
+                                font-size:10px;
+                                box-sizing:border-box;
+                            "/>
+                        </div>
+                    </div>
+                    <div style="
+                        display:grid;
+                        grid-template-columns:1fr 1fr;
+                        gap:5px;
+                        margin-top:8px;
+                    ">
+                        <button id="aht-btn-save-goals" style="
+                            background:#27ae60;
+                            color:#fff;
+                            border:none;
+                            border-radius:4px;
+                            padding:8px;
+                            cursor:pointer;
+                            font-size:10px;
+                            font-weight:bold;
+                        " title="Save custom goals">💾 Save</button>
+                        <button id="aht-btn-reset-goals" style="
+                            background:#e74c3c;
+                            color:#fff;
+                            border:none;
+                            border-radius:4px;
+                            padding:8px;
+                            cursor:pointer;
+                            font-size:10px;
+                            font-weight:bold;
+                        " title="Reset to default goals">🔄 Reset</button>
+                    </div>
+                </div>
+
+                <!-- Log Panel -->
+                <div id="aht-log-panel" style="
+                    display:none;
+                    max-height:300px;
+                    overflow-y:auto;
+                    background:#0f0f1a;
+                    border-radius:6px;
+                    padding:8px;
+                    font-size:10px;
+                    border:1px solid #333;
+                    margin-top:6px;
+                "></div>
+
+                <!-- Help Panel -->
+                <div id="aht-help-panel" style="
+                    display:none;
+                    max-height:300px;
+                    overflow-y:auto;
+                    background:#0f0f1a;
+                    border-radius:6px;
+                    padding:10px;
+                    font-size:10px;
+                    line-height:1.5;
+                    border:1px solid #333;
+                    margin-top:6px;
+                "></div>
+            </div>
+
+            <div id="aht-resize-handle" style="
+                position:absolute;
+                bottom:0;
+                right:0;
+                width:14px;
+                height:14px;
+                cursor:nwse-resize;
+                background:linear-gradient(135deg, transparent 50%, #00d4ff 50%);
+                border-radius:0 0 12px 0;
+                opacity:0.3;
+                flex-shrink:0;
+                display:${isMinimized ? 'none' : 'block'};
+            "></div>
+        `;
+
+        document.body.appendChild(panel);
+
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.6; }
+            }
+            #aht-tracker-panel {
+                scrollbar-width: thin;
+                scrollbar-color: #444 #1a1a2e;
+            }
+            #aht-tracker-panel::-webkit-scrollbar {
+                width: 6px;
+            }
+            #aht-tracker-panel::-webkit-scrollbar-track {
+                background: #1a1a2e;
+            }
+            #aht-tracker-panel::-webkit-scrollbar-thumb {
+                background: #444;
+                border-radius: 3px;
+            }
+            #aht-tracker-panel button:hover:not(:disabled) {
+                opacity: 0.85;
+                transform: scale(1.02);
+                transition: all 0.2s;
+            }
+            #aht-tracker-panel button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+        `;
+        document.head.appendChild(style);
+
+        setTimeout(() => {
+            cacheDOMElements();
+            attachEvents();
+            attachDragResize();
+            refreshCaseType();
+            updateDisplay();
+        }, 100);
+
+        console.log('✅ Panel built (v3.3.4 - Photon detection fixed)');
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🖱️ DRAG & RESIZE HANDLERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function attachDragResize() {
+        const panel = document.getElementById('aht-tracker-panel');
+        const header = document.getElementById('aht-panel-header');
+        const resizeHandle = document.getElementById('aht-resize-handle');
+
+        if (!panel || !header) return;
+
+        const onMouseDown = (e) => {
+            if (e.target.id === 'aht-btn-minimize') return;
+            isDragging = true;
+            dragOffsetX = e.clientX - panel.getBoundingClientRect().left;
+            dragOffsetY = e.clientY - panel.getBoundingClientRect().top;
+        };
+
+        const onMouseMove = (e) => {
+            if (isDragging) {
+                const rect = panel.getBoundingClientRect();
+                const maxX = window.innerWidth - rect.width;
+                const maxY = window.innerHeight - rect.height;
+
+                panel.style.left = Math.max(0, Math.min(e.clientX - dragOffsetX, maxX)) + 'px';
+                panel.style.top = Math.max(0, Math.min(e.clientY - dragOffsetY, maxY)) + 'px';
+                panel.style.bottom = 'auto';
+                panel.style.right = 'auto';
+            }
+
+            if (isResizing) {
+                const newWidth = Math.max(240, resizeStartWidth + (e.clientX - resizeStartX));
+                const newHeight = Math.max(320, resizeStartHeight + (e.clientY - resizeStartY));
+                panel.style.width = newWidth + 'px';
+                panel.style.height = newHeight + 'px';
+            }
+        };
+
+        const onMouseUp = () => {
+            if (isDragging || isResizing) {
+                isDragging = false;
+                isResizing = false;
+                savePanelState(panel);
+            }
+        };
+
+        header.addEventListener('mousedown', onMouseDown);
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+
+        if (resizeHandle) {
+            resizeHandle.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                isResizing = true;
+                resizeStartX = e.clientX;
+                resizeStartY = e.clientY;
+                const rect = panel.getBoundingClientRect();
+                resizeStartWidth = rect.width;
+                resizeStartHeight = rect.height;
+            });
+        }
+
+        registerCleanup(() => {
+            header.removeEventListener('mousedown', onMouseDown);
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🔗 EVENT HANDLERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function attachEvents() {
+        const handlers = [
+            ['aht-btn-stop', 'click', stopTimer],
+            ['aht-btn-minimize', 'click', toggleMinimize],
+            ['aht-btn-undo', 'click', undoLastDelete],
+            ['aht-btn-stats', 'click', toggleStatsPanel],
+            ['aht-btn-edit-goals', 'click', toggleGoalsEditor],
+            ['aht-btn-save-goals', 'click', saveGoalsFromInputs],
+            ['aht-btn-reset-goals', 'click', () => {
+                if (confirm('Reset to defaults?')) resetGoalsToDefault();
+            }],
+            ['aht-btn-override-email', 'click', () => {
+                currentCaseType = 'email';
+                updateCaseTypeUI();
+                updateStatusMsg('📧 Email', '#8e44ad');
+            }],
+            ['aht-btn-override-nonemail', 'click', () => {
+                currentCaseType = 'nonemail';
+                updateCaseTypeUI();
+                updateStatusMsg('📁 Non-Email', '#2980b9');
+            }],
+            ['aht-btn-override-photon', 'click', () => {
+                currentCaseType = 'photon';
+                updateCaseTypeUI();
+                updateStatusMsg('⚛ Photon', '#c0392b');
+            }],
+            ['aht-btn-log', 'click', () => {
+                const lp = document.getElementById('aht-log-panel');
+                if (lp) {
+                    if (lp.style.display === 'none') {
+                        renderLog();
+                        lp.style.display = 'block';
+                    } else {
+                        lp.style.display = 'none';
+                    }
+                }
+            }],
+            ['aht-btn-help', 'click', displayHelpInstructions],
+            ['aht-btn-clear', 'click', () => {
+                if (confirm('Clear all logs?')) {
+                    safeSetStorage(CONFIG.storage.log, JSON.stringify([]));
+                    safeSetStorage(CONFIG.storage.excluded, JSON.stringify([]));
+                    const lp = document.getElementById('aht-log-panel');
+                    if (lp) lp.innerHTML = '<em>Log cleared.</em>';
+                    updateStatusMsg('✅ Logs cleared', '#2ecc71');
+                }
+            }],
+            ['aht-btn-export', 'click', exportToExcel]
+        ];
+
+        handlers.forEach(([id, event, handler]) => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.removeEventListener(event, handler);
+                el.addEventListener(event, handler);
+            }
+        });
+
+        console.log('✅ Events attached');
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ⭐ MUTATION OBSERVER
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function setupMutationObserver() {
+        if (mutationObserver) {
+            mutationObserver.disconnect();
+            mutationObserver = null;
+        }
+
+        mutationObserver = new MutationObserver(() => {
+            try {
+                if (!document.getElementById('aht-tracker-panel')) {
+                    if (rebuildTimeout) clearTimeout(rebuildTimeout);
+                    rebuildTimeout = setTimeout(() => {
+                        if (!document.getElementById('aht-tracker-panel')) {
+                            buildPanel();
+                        }
+                    }, CONFIG.timers.panelRebuild);
+                }
+
+                const newUrl = location.href;
+                if (newUrl !== lastUrl) {
+                    if (urlCheckTimeout) clearTimeout(urlCheckTimeout);
+                    urlCheckTimeout = setTimeout(() => {
+                        lastUrl = newUrl;
+                        const newCaseId = detectCaseId();
+
+                        if (newCaseId !== manuallyStoppedOnCase && !isRunning) {
+                            currentCaseId = newCaseId;
+                            elapsedSeconds = 0;
+                            if (DOM.display) DOM.display.textContent = '00:00';
+                            if (DOM.dag) DOM.dag.textContent = 'DAG: —';
+                            updateStatusMsg('🚀 New case!', '#aaa');
+
+                            setTimeout(() => {
+                                manuallyStoppedOnCase = null;
+                                refreshCaseType();
+                                startTimer();
+                            }, CONFIG.timers.caseChangeDelay);
+                        }
+                    }, 300);
+                }
+            } catch (e) {
+                console.error('❌ Observer error:', e);
+            }
+        });
+
+        mutationObserver.observe(document, {
+            subtree: false,
+            childList: true
+        });
+
+        registerCleanup(() => {
+            if (mutationObserver) {
+                mutationObserver.disconnect();
+                mutationObserver = null;
+            }
+        });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🧭 PAGE UNLOAD HANDLER
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function setupPageUnloadHandler() {
+        const saveOnUnload = () => {
+            if (isRunning && elapsedSeconds > 0) {
+                const dag = calcDAG(elapsedSeconds, currentCaseType);
+                saveLog(dag);
+            }
+        };
+
+        window.addEventListener('beforeunload', saveOnUnload);
+        registerCleanup(() => {
+            window.removeEventListener('beforeunload', saveOnUnload);
+        });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // 🎯 INITIALIZATION
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function initialize() {
+        if (!document.body) {
+            setTimeout(initialize, 200);
+            return;
+        }
+
+        console.log('═══════════════════════════════════════════════════════');
+        console.log('  ✨ Initializing AHT Tracker v3.3.4 - PHOTON FIX');
+        console.log('═══════════════════════════════════════════════════════');
+
+        loadGoals();
+        const timerRestored = restoreTimerState();
+
+        buildPanel();
+        setupPageUnloadHandler();
+        setupMutationObserver();
+
+        if (timerRestored && isRunning) {
+            setTimeout(() => {
+                timerInterval = setInterval(() => {
+                    try {
+                        elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+                        updateDisplay();
+                        saveTimerState();
+                    } catch (e) {
+                        console.error('❌ Timer error:', e);
+                    }
+                }, CONFIG.timers.updateFrequency);
+
+                setButtonStates(true);
+                updateDisplay();
+                updateStatusMsg('🟢 Resumed', '#2ecc71');
+                pageLoadInitialized = true;
+            }, 500);
+        } else if (shouldAutoStartOnLoad && !pageLoadInitialized) {
+            setTimeout(() => {
+                startTimer();
+                pageLoadInitialized = true;
+            }, 500);
+        } else {
+            pageLoadInitialized = true;
+        }
+
+        console.log('═══════════════════════════════════════════════════════');
+        console.log('  🎉 AHT Tracker v3.3.4 Ready!');
+        console.log('═══════════════════════════════════════════════════════');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+        initialize();
+    }
+
 })();
