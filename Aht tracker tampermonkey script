@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         OTC GWF AHT Tracker (v3.3.4 PHOTON FIX)
+// @name         OTC GWF AHT Tracker 
 // @namespace    http://tampermonkey.net/
 // @version      3.3.5
 // @description  Phase 1 fixes + Case exclusion (per-instance) + UNDO (30s) + Daily/Weekly stats + RESPONSIVE LAYOUT + PROPER MINIMIZE + FIXED PHOTON CASE DETECTION + VIEW-CASE URL SUPPORT
-// @author       SEPO Team - Advanced Build
+// @author       sreymark
 // @match        https://paragon.amazon.com/hz/*
 // @match        https://paragon-na.amazon.com/hz/*
 // @match        https://paragon-eu.amazon.com/hz/*
@@ -862,39 +862,39 @@
         console.log('✅ Timer started');
     }
 
-    function stopTimer() {
-        if (timerInterval !== null) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-        }
-
-        isRunning = false;
-        const dag = calcDAG(elapsedSeconds, currentCaseType);
-        saveLog(dag);
-
-        manuallyStoppedOnCase = currentCaseId;
-        stoppedAtZero = (elapsedSeconds === 0);
-
-        updateStatusMsg(`✅ Saved | DAG: ${dag}%`, '#00d4ff');
-        setButtonStates(false);
-        saveTimerState();
-
-        elapsedSeconds = 0;
-        caseStartTimestamp = null;
-
-        if (DOM.display) {
-            DOM.display.textContent = '00:00';
-            DOM.display.style.color = '#00d4ff';
-        }
-        if (DOM.bar) {
-            DOM.bar.style.width = '0%';
-            DOM.bar.style.background = '#00d4ff';
-        }
-        if (DOM.dag) DOM.dag.textContent = 'DAG: —';
-
-        updateStatusMsg('⏸ Timer paused', '#aaa');
-        console.log(`🛑 Timer stopped`);
+  function stopTimer() {
+    if (timerInterval !== null) {
+        clearInterval(timerInterval);
+        timerInterval = null;
     }
+
+    isRunning = false;
+    const dag = calcDAG(elapsedSeconds, currentCaseType);
+    saveLog(dag);
+
+    manuallyStoppedOnCase = currentCaseId;
+    stoppedAtZero = (elapsedSeconds === 0);
+
+    updateStatusMsg(`✅ Saved | DAG: ${dag}%`, '#00d4ff');
+    setButtonStates(false);  // ✅ Disable stop button
+    saveTimerState();
+
+    elapsedSeconds = 0;
+    caseStartTimestamp = null;
+
+    if (DOM.display) {
+        DOM.display.textContent = '00:00';
+        DOM.display.style.color = '#00d4ff';
+    }
+    if (DOM.bar) {
+        DOM.bar.style.width = '0%';
+        DOM.bar.style.background = '#00d4ff';
+    }
+    if (DOM.dag) DOM.dag.textContent = 'DAG: —';
+
+    updateStatusMsg('⏸ Timer paused', '#aaa');
+    console.log(`🛑 Timer stopped`);
+}
 
     // ═════════════════════════════════════════════════════════════════════════
     // 💾 TIMER STATE PERSISTENCE
