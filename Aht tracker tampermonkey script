@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         OTC GWF AHT Tracker 
+// @name         OTC GWF AHT Tracker
 // @namespace    http://tampermonkey.net/
-// @version      3.3.5
-// @description  Phase 1 fixes + Case exclusion (per-instance) + UNDO (30s) + Daily/Weekly stats + RESPONSIVE LAYOUT + PROPER MINIMIZE + FIXED PHOTON CASE DETECTION + VIEW-CASE URL SUPPORT
+// @version      3.3.14
+// @description  Phase 1 fixes + Case exclusion (per-instance) + UNDO (30s) + Daily/Weekly stats + RESPONSIVE LAYOUT + PROPER MINIMIZE + FIXED PHOTON CASE DETECTION + VIEW-CASE URL SUPPORT + TIMER RESUME ON SAME CASE + NO LOBBY EXCLUSION + CASE ID VALIDATION + CASE CLOSURE LOGGING + 12SEC COMPENSATION
 // @author       sreymark
 // @match        https://paragon.amazon.com/hz/*
 // @match        https://paragon-na.amazon.com/hz/*
@@ -20,19 +20,16 @@
     'use strict';
 
     // ═════════════════════════════════════════════════════════════════════════
-    // 🔒 CRITICAL: URL & IFRAME VALIDATION (v3.3.5 FIX)
+    // 🔒 CRITICAL: URL & IFRAME VALIDATION (v3.3.14)
     // ═════════════════════════════════════════════════════════════════════════
 
-    // ✅ DO NOT RUN IN IFRAMES
     if (window.self !== window.top) {
         console.log('⚠️ [AHT TRACKER] Running in iframe, skipping initialization');
         return;
     }
 
-    // ✅ ONLY RUN ON SPECIFIC PAGES
     const currentUrl = window.location.href;
     const isValidPage = () => {
-        // Must have /hz/ in URL (covers /hz/entity, /hz/view-case, etc)
         if (!currentUrl.includes('/hz/')) {
             return false;
         }
@@ -44,7 +41,6 @@
         return;
     }
 
-    // ✅ PREVENT MULTIPLE SCRIPT EXECUTIONS
     if (window.AHT_TRACKER_INITIALIZED) {
         console.log('⚠️ [AHT TRACKER] Already initialized on this page, skipping');
         return;
@@ -52,7 +48,7 @@
     window.AHT_TRACKER_INITIALIZED = true;
 
     console.log('═══════════════════════════════════════════════════════');
-    console.log('  🚀 AHT TRACKER v3.3.5 - VIEW-CASE URL SUPPORT');
+    console.log('  🚀 AHT TRACKER v3.3.14 - COMPENSATION ACTIVE (12 SEC)');
     console.log('═══════════════════════════════════════════════════════');
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -67,12 +63,13 @@
             timer: 'aht_timer_state_v3',
             minimized: 'aht_panel_minimized_v3',
             goals: 'aht_goals_v3',
-            excluded: 'aht_excluded_entries_v3'
+            excluded: 'aht_excluded_entries_v3',
+            unloadState: 'aht_unload_state_v3'
         },
         defaults: {
-            email: 4.5 * 60,    // 270 seconds
-            nonemail: 8.0 * 60, // 480 seconds
-            photon: 8.0 * 60    // 480 seconds
+            email: 4.5 * 60,
+            nonemail: 8.0 * 60,
+            photon: 8.0 * 60
         },
         patterns: {
             email: /(claims-atoz-inquiries-sesu|trms-pi-claims-cs-escalation-claims|claims-asor-inquiries-sss)@amazon\.[a-z.]+/i,
@@ -92,6 +89,9 @@
         }
     };
 
+    // ⭐ SECRET: 12-SECOND COMPENSATION (v3.3.14)
+    const STARTUP_DELAY_SECONDS = 12;
+
     // ═════════════════════════════════════════════════════════════════════════
     // 🔧 STORAGE VALIDATION LAYER
     // ═════════════════════════════════════════════════════════════════════════
@@ -99,13 +99,10 @@
     function safeGetStorage(key, defaultValue = null) {
         try {
             const value = GM_getValue(key, null);
-
             if (value === null || value === undefined) {
                 return defaultValue;
             }
-
             const parsed = JSON.parse(value);
-
             if (key === CONFIG.storage.log || key === CONFIG.storage.excluded) {
                 if (!Array.isArray(parsed)) {
                     console.warn(`⚠️ [VALIDATION] Storage key '${key}' is not an array, resetting`);
@@ -116,7 +113,6 @@
                     return parsed.slice(-5000);
                 }
             }
-
             return parsed;
         } catch (e) {
             console.error(`❌ [STORAGE ERROR] Failed to retrieve '${key}':`, e.message);
@@ -127,13 +123,10 @@
     function safeSetStorage(key, value) {
         try {
             let stringValue = typeof value === 'string' ? value : JSON.stringify(value);
-
             JSON.parse(stringValue);
-
             if (stringValue.length > 5000000) {
                 console.warn(`⚠️ [STORAGE] Data size: ${(stringValue.length / 1024 / 1024).toFixed(2)}MB`);
             }
-
             GM_setValue(key, stringValue);
             return true;
         } catch (e) {
@@ -146,7 +139,6 @@
         if (!entry || typeof entry !== 'object') {
             return null;
         }
-
         try {
             return {
                 caseId: String(entry.caseId || 'UNKNOWN').substring(0, 100),
@@ -170,20 +162,16 @@
     function loadLogSafely() {
         try {
             const raw = safeGetStorage(CONFIG.storage.log, []);
-
             if (!Array.isArray(raw)) {
                 console.warn('⚠️ Log storage is not an array');
                 return [];
             }
-
             const validated = raw
                 .map(validateLogEntry)
                 .filter(entry => entry !== null);
-
             if (validated.length < raw.length) {
                 console.warn(`⚠️ Filtered out ${raw.length - validated.length} corrupted entries`);
             }
-
             return validated;
         } catch (e) {
             console.error('❌ Error loading log:', e);
@@ -192,7 +180,7 @@
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // ⭐ SPECIFIC ENTRY EXCLUSION MANAGEMENT (v3.3)
+    // ⭐ SPECIFIC ENTRY EXCLUSION MANAGEMENT
     // ═════════════════════════════════════════════════════════════════════════
 
     function getEntryKey(caseId, timestamp) {
@@ -211,7 +199,6 @@
         const excluded = loadExcludedEntries();
         const key = getEntryKey(caseId, timestamp);
         const index = excluded.indexOf(key);
-
         if (index > -1) {
             excluded.splice(index, 1);
             console.log(`✅ Entry ${key} now INCLUDED`);
@@ -219,7 +206,6 @@
             excluded.push(key);
             console.log(`🚫 Entry ${key} now EXCLUDED`);
         }
-
         saveExcludedEntries(excluded);
         return excluded;
     }
@@ -237,14 +223,12 @@
     function findDuplicateCases(log) {
         const caseIdMap = {};
         const duplicates = [];
-
         for (const entry of log) {
             if (!caseIdMap[entry.caseId]) {
                 caseIdMap[entry.caseId] = [];
             }
             caseIdMap[entry.caseId].push(entry);
         }
-
         for (const [caseId, entries] of Object.entries(caseIdMap)) {
             if (entries.length > 1) {
                 duplicates.push({
@@ -254,27 +238,22 @@
                 });
             }
         }
-
         return duplicates;
     }
 
     function autoExcludeDuplicates() {
         const log = loadLogSafely();
         const duplicates = findDuplicateCases(log);
-
         if (duplicates.length === 0) {
             alert('✅ No duplicate cases found!');
             return false;
         }
-
         let excluded = 0;
         const excludedEntries = loadExcludedEntries();
-
         for (const dup of duplicates) {
             const instances = dup.instances.sort((a, b) =>
                 new Date(a.timestamp) - new Date(b.timestamp)
             );
-
             for (let i = 1; i < instances.length; i++) {
                 const entry = instances[i];
                 const key = getEntryKey(entry.caseId, entry.timestamp);
@@ -284,9 +263,7 @@
                 }
             }
         }
-
         saveExcludedEntries(excludedEntries);
-
         console.log(`✅ Auto-excluded ${excluded} duplicate entries (kept first instance of each)`);
         return true;
     }
@@ -331,9 +308,7 @@
         try {
             lastDeletedEntry = entry;
             undoButtonVisible = true;
-
             showUndoButton();
-
             if (undoTimer) clearTimeout(undoTimer);
             undoTimer = setTimeout(() => {
                 lastDeletedEntry = null;
@@ -341,7 +316,6 @@
                 hideUndoButton();
                 console.log('⏱ Undo window expired');
             }, CONFIG.timers.undoWindow);
-
             console.log(`💾 Undo buffer: ${entry.caseId} (${entry.formatted})`);
         } catch (e) {
             console.error('❌ Error saving to undo:', e);
@@ -353,25 +327,20 @@
             alert('⚠️ Nothing to undo!');
             return;
         }
-
         try {
             const log = loadLogSafely();
             log.push(lastDeletedEntry);
-
             const success = safeSetStorage(CONFIG.storage.log, JSON.stringify(log));
             if (success) {
                 console.log(`✅ UNDO: Restored ${lastDeletedEntry.caseId}`);
                 lastDeletedEntry = null;
                 undoButtonVisible = false;
                 hideUndoButton();
-
                 if (undoTimer) clearTimeout(undoTimer);
-
                 updateStatusMsg('✅ Restored!', '#2ecc71');
                 setTimeout(() => {
                     updateStatusMsg('Tracking...', '#aaa');
                 }, 2000);
-
                 const logPanel = document.getElementById('aht-log-panel');
                 if (logPanel && logPanel.style.display !== 'none') {
                     renderLog();
@@ -426,9 +395,7 @@
 
     function calcStatsForDateRange(log, startDate, endDate) {
         if (!Array.isArray(log) || log.length === 0) return null;
-
         const excluded = loadExcludedEntries();
-
         const filteredLog = log.filter(entry => {
             const entryDate = getDateFromTimestamp(entry.timestamp);
             const key = getEntryKey(entry.caseId, entry.timestamp);
@@ -436,16 +403,12 @@
                    entryDate <= endDate &&
                    !excluded.includes(key);
         });
-
         if (filteredLog.length === 0) return null;
-
         let emailCount = 0, nonEmailCount = 0, photonCount = 0;
         let emailTotal = 0, nonEmailTotal = 0, photonTotal = 0;
-
         for (const entry of filteredLog) {
             try {
                 const duration = Math.max(0, parseInt(entry.duration) || 0);
-
                 if (entry.caseType === 'email') {
                     emailCount++;
                     emailTotal += duration;
@@ -460,22 +423,17 @@
                 console.warn('⚠️ Error processing entry:', e);
             }
         }
-
         const totalCases = emailCount + nonEmailCount + photonCount;
         if (totalCases === 0) return null;
-
         const emailWeight = emailCount / totalCases;
         const nonEmailWeight = nonEmailCount / totalCases;
         const photonWeight = photonCount / totalCases;
-
         const avgEmailAHT = emailCount > 0 ? emailTotal / emailCount : 0;
         const avgNonEmailAHT = nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : 0;
         const avgPhotonAHT = photonCount > 0 ? photonTotal / photonCount : 0;
-
         const emailDAG = emailCount > 0 ? ((AHT_GOALS.email / avgEmailAHT) * 100).toFixed(1) : null;
         const nonEmailDAG = nonEmailCount > 0 ? ((AHT_GOALS.nonemail / avgNonEmailAHT) * 100).toFixed(1) : null;
         const photonDAG = photonCount > 0 ? ((AHT_GOALS.photon / avgPhotonAHT) * 100).toFixed(1) : null;
-
         const weightedGoalAHT = (AHT_GOALS.email * emailWeight) +
                                 (AHT_GOALS.nonemail * nonEmailWeight) +
                                 (AHT_GOALS.photon * photonWeight);
@@ -485,7 +443,6 @@
         const weightedDAG = weightedAchievedAHT > 0
             ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1)
             : null;
-
         return {
             startDate,
             endDate,
@@ -538,20 +495,18 @@
     // ═════════════════════════════════════════════════════════════════════════
 
     let AHT_GOALS = { ...CONFIG.defaults };
-
     let timerInterval = null;
     let mutationObserver = null;
     let rebuildTimeout = null;
     let urlCheckTimeout = null;
-
     let startTime = null;
     let elapsedSeconds = 0;
     let isRunning = false;
     let currentCaseId = detectCaseId();
+    let isCaseIdValid = isValidCaseId(currentCaseId);
     let currentCaseType = 'nonemail';
     let currentQueueName = '';
     let caseStartTimestamp = null;
-
     let isDragging = false;
     let dragOffsetX = 0;
     let dragOffsetY = 0;
@@ -560,7 +515,6 @@
     let resizeStartY = 0;
     let resizeStartWidth = 0;
     let resizeStartHeight = 0;
-
     let helpPanelOpen = false;
     let isMinimized = false;
     let goalsEditorOpen = false;
@@ -570,6 +524,7 @@
     let stoppedAtZero = false;
     let shouldAutoStartOnLoad = true;
     let lastUrl = location.href;
+    let lastSavedCaseId = null;
 
     // ═════════════════════════════════════════════════════════════════════════
     // 📦 DOM ELEMENT CACHE
@@ -608,7 +563,6 @@
     function loadGoals() {
         try {
             const stored = safeGetStorage(CONFIG.storage.goals, null);
-
             if (stored && typeof stored === 'object') {
                 AHT_GOALS = {
                     email: Math.max(60, parseInt(stored.email) || CONFIG.defaults.email),
@@ -621,7 +575,6 @@
         } catch (e) {
             console.error('❌ Error loading goals:', e);
         }
-
         AHT_GOALS = { ...CONFIG.defaults };
         console.log('ℹ️ Using default AHT goals');
     }
@@ -643,15 +596,38 @@
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // 🧭 CASE DETECTION (v3.3.5 VIEW-CASE SUPPORT)
+    // 🧭 CASE DETECTION
     // ═════════════════════════════════════════════════════════════════════════
+
+    function isValidCaseId(caseId) {
+        if (!caseId || typeof caseId !== 'string') {
+            console.warn('❌ [CASE ID VALIDATION] Invalid case ID type');
+            return false;
+        }
+        const trimmed = caseId.trim();
+        if (trimmed.length < 3) {
+            console.warn('❌ [CASE ID VALIDATION] Case ID too short:', caseId);
+            return false;
+        }
+        if (trimmed.includes('UNKNOWN') || trimmed.startsWith('UNKNOWN-')) {
+            console.warn('❌ [CASE ID VALIDATION] Case ID detection failed (UNKNOWN fallback):', caseId);
+            return false;
+        }
+        console.log('✅ [CASE ID VALIDATION] Case ID is valid:', caseId);
+        return true;
+    }
+
+    function normalizeAndCompareCaseIds(caseId1, caseId2) {
+        const normalize = (id) => String(id || '').trim().toLowerCase();
+        const result = normalize(caseId1) === normalize(caseId2);
+        console.log(`🔍 [CASE COMPARISON] ${caseId1} === ${caseId2} ? ${result}`);
+        return result;
+    }
 
     function detectCaseId() {
         const detectors = [
-            // Check URL params first
             () => new URLSearchParams(window.location.search).get('caseId'),
             () => new URLSearchParams(window.location.search).get('id'),
-            // Check entityId for Photon cases
             () => {
                 const entityId = new URLSearchParams(window.location.search).get('entityId');
                 if (entityId) {
@@ -663,28 +639,25 @@
                 }
                 return null;
             },
-            // Check URL path
             () => {
                 const match = window.location.href.match(/\/(cases|investigation|view-case)\/([A-Z0-9\-]+)/i);
                 return match ? match[2] : null;
             }
         ];
-
         for (const detector of detectors) {
             try {
                 const result = detector();
                 if (result && String(result).length > 3) {
-                    console.log(`✅ [CASE DETECTION] Found Case ID: ${result}`);
-                    return String(result).substring(0, 100);
+                    const caseId = String(result).substring(0, 100);
+                    console.log(`✅ [CASE DETECTION] Found Case ID: ${caseId}`);
+                    return caseId;
                 }
             } catch (e) {
                 console.warn('⚠️ Case detection error:', e);
             }
         }
-
-        const fallbackId = `UNKNOWN-${Date.now()}`;
-        console.warn(`⚠️ [CASE DETECTION] No case ID found, using fallback: ${fallbackId}`);
-        return fallbackId;
+        console.warn(`❌ [CASE DETECTION] Unable to detect case ID (common in lobby)`);
+        return null;
     }
 
     function detectCaseType() {
@@ -695,14 +668,12 @@
             console.log('✅ [CASE TYPE] UnitOfWork detected - PHOTON');
             return currentCaseType;
         }
-
         const bodyText = document.body ? (document.body.innerText || '') : '';
         const queuePatterns = [
             /Queue[:\s]+([^\r\n]+)/i,
             /Queue Name[:\s]+([^\r\n]+)/i,
             /Assigned Queue[:\s]+([^\r\n]+)/i
         ];
-
         let queueName = '';
         for (const pattern of queuePatterns) {
             const match = bodyText.match(pattern);
@@ -712,7 +683,6 @@
             }
         }
         currentQueueName = queueName;
-
         if (CONFIG.patterns.photon.test(currentQueueName)) {
             currentCaseType = 'photon';
             console.log('✅ [CASE TYPE] Queue matches PHOTON pattern:', currentQueueName);
@@ -723,7 +693,6 @@
             currentCaseType = 'nonemail';
             console.log('✅ [CASE TYPE] Defaulting to NON-EMAIL. Queue:', currentQueueName);
         }
-
         return currentCaseType;
     }
 
@@ -750,26 +719,20 @@
 
     function calcWeightedStats(log) {
         if (!Array.isArray(log) || log.length === 0) return null;
-
         const excluded = loadExcludedEntries();
-
         const filteredLog = log.filter(entry => {
             const key = getEntryKey(entry.caseId, entry.timestamp);
             return !excluded.includes(key);
         });
-
         if (filteredLog.length === 0) {
             console.warn('⚠️ All entries excluded');
             return null;
         }
-
         let emailCount = 0, nonEmailCount = 0, photonCount = 0;
         let emailTotal = 0, nonEmailTotal = 0, photonTotal = 0;
-
         for (const entry of filteredLog) {
             try {
                 const duration = Math.max(0, parseInt(entry.duration) || 0);
-
                 if (entry.caseType === 'email') {
                     emailCount++;
                     emailTotal += duration;
@@ -784,22 +747,17 @@
                 console.warn('⚠️ Error processing entry:', e);
             }
         }
-
         const totalCases = emailCount + nonEmailCount + photonCount;
         if (totalCases === 0) return null;
-
         const emailWeight = emailCount / totalCases;
         const nonEmailWeight = nonEmailCount / totalCases;
         const photonWeight = photonCount / totalCases;
-
         const avgEmailAHT = emailCount > 0 ? emailTotal / emailCount : 0;
         const avgNonEmailAHT = nonEmailCount > 0 ? nonEmailTotal / nonEmailCount : 0;
         const avgPhotonAHT = photonCount > 0 ? photonTotal / photonCount : 0;
-
         const emailDAG = emailCount > 0 ? ((AHT_GOALS.email / avgEmailAHT) * 100).toFixed(1) : null;
         const nonEmailDAG = nonEmailCount > 0 ? ((AHT_GOALS.nonemail / avgNonEmailAHT) * 100).toFixed(1) : null;
         const photonDAG = photonCount > 0 ? ((AHT_GOALS.photon / avgPhotonAHT) * 100).toFixed(1) : null;
-
         const weightedGoalAHT = (AHT_GOALS.email * emailWeight) +
                                 (AHT_GOALS.nonemail * nonEmailWeight) +
                                 (AHT_GOALS.photon * photonWeight);
@@ -809,7 +767,6 @@
         const weightedDAG = weightedAchievedAHT > 0
             ? ((weightedGoalAHT / weightedAchievedAHT) * 100).toFixed(1)
             : null;
-
         return {
             weightedDAG, weightedGoalAHT, weightedAchievedAHT,
             totalCases,
@@ -827,18 +784,21 @@
     // ═════════════════════════════════════════════════════════════════════════
 
     function startTimer() {
+        if (!isCaseIdValid) {
+            console.warn('❌ [TIMER] Cannot start timer - Case ID is invalid');
+            updateStatusMsg('❌ Case ID not detected', '#e74c3c');
+            setButtonStates(false);
+            return;
+        }
         if (isRunning) return;
-
         if (timerInterval !== null) {
             clearInterval(timerInterval);
             timerInterval = null;
         }
-
         refreshCaseType();
         isRunning = true;
         caseStartTimestamp = new Date().toISOString();
         startTime = Date.now() - (elapsedSeconds * 1000);
-
         timerInterval = setInterval(() => {
             try {
                 elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
@@ -848,53 +808,51 @@
                 console.error('❌ Timer error:', e);
             }
         }, CONFIG.timers.updateFrequency);
-
         registerCleanup(() => {
             if (timerInterval !== null) {
                 clearInterval(timerInterval);
                 timerInterval = null;
             }
         });
-
         setButtonStates(true);
         updateStatusMsg('🟢 Tracking...', '#2ecc71');
         saveTimerState();
         console.log('✅ Timer started');
     }
 
-  function stopTimer() {
-    if (timerInterval !== null) {
-        clearInterval(timerInterval);
-        timerInterval = null;
+    function stopTimer() {
+        if (timerInterval !== null) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+        }
+        isRunning = false;
+        const dag = calcDAG(elapsedSeconds, currentCaseType);
+        if (isCaseIdValid && (lastSavedCaseId !== currentCaseId || elapsedSeconds === 0)) {
+            saveLog(dag);
+            lastSavedCaseId = currentCaseId;
+        } else if (!isCaseIdValid) {
+            console.warn('❌ [STOP] Not saving - Case ID is invalid');
+            updateStatusMsg('❌ Invalid Case ID - Not saved', '#e74c3c');
+        }
+        manuallyStoppedOnCase = currentCaseId;
+        stoppedAtZero = (elapsedSeconds === 0);
+        updateStatusMsg(`✅ Saved | DAG: ${dag}%`, '#00d4ff');
+        setButtonStates(false);
+        saveTimerState();
+        elapsedSeconds = 0;
+        caseStartTimestamp = null;
+        if (DOM.display) {
+            DOM.display.textContent = '00:00';
+            DOM.display.style.color = '#00d4ff';
+        }
+        if (DOM.bar) {
+            DOM.bar.style.width = '0%';
+            DOM.bar.style.background = '#00d4ff';
+        }
+        if (DOM.dag) DOM.dag.textContent = 'DAG: —';
+        updateStatusMsg('⏸ Timer paused', '#aaa');
+        console.log(`🛑 Timer stopped`);
     }
-
-    isRunning = false;
-    const dag = calcDAG(elapsedSeconds, currentCaseType);
-    saveLog(dag);
-
-    manuallyStoppedOnCase = currentCaseId;
-    stoppedAtZero = (elapsedSeconds === 0);
-
-    updateStatusMsg(`✅ Saved | DAG: ${dag}%`, '#00d4ff');
-    setButtonStates(false);  // ✅ Disable stop button
-    saveTimerState();
-
-    elapsedSeconds = 0;
-    caseStartTimestamp = null;
-
-    if (DOM.display) {
-        DOM.display.textContent = '00:00';
-        DOM.display.style.color = '#00d4ff';
-    }
-    if (DOM.bar) {
-        DOM.bar.style.width = '0%';
-        DOM.bar.style.background = '#00d4ff';
-    }
-    if (DOM.dag) DOM.dag.textContent = 'DAG: —';
-
-    updateStatusMsg('⏸ Timer paused', '#aaa');
-    console.log(`🛑 Timer stopped`);
-}
 
     // ═════════════════════════════════════════════════════════════════════════
     // 💾 TIMER STATE PERSISTENCE
@@ -909,6 +867,7 @@
             queueName: currentQueueName,
             caseStartTimestamp: caseStartTimestamp,
             stoppedAtZero: stoppedAtZero,
+            lastSavedCaseId: lastSavedCaseId,
             savedAt: Date.now()
         };
         safeSetStorage(CONFIG.storage.timer, JSON.stringify(timerState));
@@ -917,26 +876,23 @@
     function restoreTimerState() {
         try {
             const timerState = safeGetStorage(CONFIG.storage.timer, null);
-
             if (!timerState) {
                 console.log('ℹ️ No saved timer state');
                 return false;
             }
-
-            if (timerState.caseId !== currentCaseId) {
+            if (!normalizeAndCompareCaseIds(timerState.caseId, currentCaseId)) {
+                console.log(`ℹ️ Case ID changed: ${timerState.caseId} → ${currentCaseId}`);
                 safeSetStorage(CONFIG.storage.timer, JSON.stringify({ isRunning: false }));
                 return false;
             }
-
             if (timerState.stoppedAtZero === true) {
+                console.log('ℹ️ Timer was stopped at zero, not resuming');
                 safeSetStorage(CONFIG.storage.timer, JSON.stringify({ isRunning: false }));
                 shouldAutoStartOnLoad = false;
                 return false;
             }
-
             if (timerState.isRunning && timerState.startTime) {
                 const calculatedElapsed = Math.floor((Date.now() - timerState.startTime) / 1000);
-
                 startTime = timerState.startTime;
                 elapsedSeconds = calculatedElapsed;
                 isRunning = true;
@@ -946,8 +902,9 @@
                 caseStartTimestamp = timerState.caseStartTimestamp;
                 stoppedAtZero = false;
                 shouldAutoStartOnLoad = false;
-
-                console.log(`✅ Timer restored: ${formatTime(elapsedSeconds)}`);
+                manuallyStoppedOnCase = null;
+                lastSavedCaseId = timerState.lastSavedCaseId || null;
+                console.log(`✅ Timer RESTORED on same case: ${formatTime(elapsedSeconds)}`);
                 return true;
             }
         } catch (e) {
@@ -957,26 +914,86 @@
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    // ⭐ UNLOAD STATE MANAGEMENT (v3.3.14)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function saveUnloadState() {
+        if (isRunning && elapsedSeconds > 0 && isCaseIdValid) {
+            const unloadState = {
+                caseId: currentCaseId,
+                caseType: currentCaseType,
+                queueName: currentQueueName,
+                elapsedSeconds: elapsedSeconds,
+                caseStartTimestamp: caseStartTimestamp,
+                timestamp: Date.now()
+            };
+            safeSetStorage(CONFIG.storage.unloadState, JSON.stringify(unloadState));
+            console.log(`💾 [UNLOAD] Case state saved: ${currentCaseId} (${formatTime(elapsedSeconds)})`);
+        }
+    }
+
+    function restoreAndLogUnloadState() {
+        try {
+            const unloadState = safeGetStorage(CONFIG.storage.unloadState, null);
+            if (!unloadState) {
+                console.log('ℹ️ [UNLOAD] No previous unload state');
+                return;
+            }
+            const newCaseId = detectCaseId();
+            const newCaseIdValid = isValidCaseId(newCaseId);
+            const isSameCase = newCaseIdValid && isCaseIdValid && normalizeAndCompareCaseIds(unloadState.caseId, newCaseId);
+            if (isSameCase) {
+                console.log(`✅ [UNLOAD] Page refresh detected - same case, discarding unload state`);
+                safeSetStorage(CONFIG.storage.unloadState, null);
+                return;
+            }
+            console.log(`📍 [UNLOAD] Different case detected - logging previous case: ${unloadState.caseId}`);
+
+            // ⭐ SECRET: Add 12 seconds compensation to elapsed time
+            const compensatedElapsedSeconds = unloadState.elapsedSeconds + STARTUP_DELAY_SECONDS;
+
+            const dag = calcDAG(compensatedElapsedSeconds, unloadState.caseType);
+            const entry = validateLogEntry({
+                caseId: unloadState.caseId,
+                caseType: unloadState.caseType,
+                queueName: unloadState.queueName,
+                duration: compensatedElapsedSeconds,
+                formatted: formatTime(compensatedElapsedSeconds),
+                goal: AHT_GOALS[unloadState.caseType],
+                dag: dag,
+                startTime: unloadState.caseStartTimestamp,
+                timestamp: new Date().toISOString()
+            });
+            if (entry) {
+                const log = loadLogSafely();
+                log.push(entry);
+                const success = safeSetStorage(CONFIG.storage.log, JSON.stringify(log));
+                if (success) {
+                    console.log(`✅ [UNLOAD] Previous case logged: ${entry.caseId} (${entry.formatted})`);
+                }
+            }
+            safeSetStorage(CONFIG.storage.unloadState, null);
+        } catch (e) {
+            console.error('❌ [UNLOAD] Error restoring unload state:', e);
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     // 📊 DISPLAY UPDATES
     // ═════════════════════════════════════════════════════════════════════════
 
     function updateDisplay() {
         if (!DOM.display) cacheDOMElements();
         if (!DOM.display) return;
-
         try {
             const goal = AHT_GOALS[currentCaseType];
             const timeStr = formatTime(elapsedSeconds);
             DOM.display.textContent = timeStr;
-
-            // Update minimized display if visible
             if (DOM.minimizedDisplay) {
                 DOM.minimizedDisplay.textContent = timeStr;
             }
-
             const pct = Math.min((elapsedSeconds / goal) * 100, 100);
             if (DOM.bar) DOM.bar.style.width = pct + '%';
-
             const dag = calcDAG(elapsedSeconds, currentCaseType);
             if (dag !== null && DOM.dag) {
                 const dagVal = parseFloat(dag);
@@ -984,7 +1001,6 @@
                 DOM.dag.textContent = `DAG: ${dag}%`;
                 DOM.dag.style.color = dagColor;
             }
-
             const warningAt = goal * 0.75;
             if (elapsedSeconds >= goal) {
                 DOM.display.style.color = '#e74c3c';
@@ -1018,7 +1034,12 @@
     function updateCaseTypeUI() {
         if (!DOM.badge) cacheDOMElements();
         if (!DOM.badge) return;
-
+        if (!isCaseIdValid) {
+            DOM.badge.textContent = '❌ Invalid';
+            DOM.badge.style.background = '#e74c3c';
+            if (DOM.goalLabel) DOM.goalLabel.textContent = 'Case ID not detected';
+            return;
+        }
         if (currentCaseType === 'email') {
             DOM.badge.textContent = 'Email';
             DOM.badge.style.background = '#8e44ad';
@@ -1032,7 +1053,6 @@
             DOM.badge.style.background = '#2980b9';
             if (DOM.goalLabel) DOM.goalLabel.textContent = `Goal: ${formatTime(AHT_GOALS.nonemail)} (Non-Email)`;
         }
-
         if (DOM.queueLabel) {
             DOM.queueLabel.textContent = currentQueueName
                 ? `Queue: ${currentQueueName}`
@@ -1051,25 +1071,29 @@
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // 💾 LOGGING & EXPORT
+    // 💾 LOGGING & EXPORT (v3.3.14 - SECRET COMPENSATION)
     // ═════════════════════════════════════════════════════════════════════════
 
     function saveLog(dag) {
+        if (!isCaseIdValid) {
+            console.warn('❌ [SAVELOG] Skipping log entry - Case ID is invalid');
+            return;
+        }
         try {
             const log = loadLogSafely();
-
+            // ⭐ SECRET: Add 12 seconds compensation to elapsed time
+            const compensatedElapsedSeconds = elapsedSeconds + STARTUP_DELAY_SECONDS;
             const entry = validateLogEntry({
                 caseId: currentCaseId,
                 caseType: currentCaseType,
                 queueName: currentQueueName,
-                duration: elapsedSeconds,
-                formatted: formatTime(elapsedSeconds),
+                duration: compensatedElapsedSeconds,
+                formatted: formatTime(compensatedElapsedSeconds),
                 goal: AHT_GOALS[currentCaseType],
                 dag: dag,
                 startTime: caseStartTimestamp,
                 timestamp: new Date().toISOString()
             });
-
             if (entry) {
                 log.push(entry);
                 const success = safeSetStorage(CONFIG.storage.log, JSON.stringify(log));
@@ -1085,18 +1109,15 @@
     function renderStatsPanel() {
         const statsPanel = document.getElementById('aht-stats-panel');
         if (!statsPanel) return;
-
         const todayStats = getTodayStats();
         const weekStats = getWeekStats();
         const monthStats = getMonthStats();
         const last7DaysStats = getLast7DaysStats();
-
         const dagColor = (dag) => {
             if (!dag) return '#aaa';
             const v = parseFloat(dag);
             return v >= 100 ? '#2ecc71' : v >= 80 ? '#f39c12' : '#e74c3c';
         };
-
         const renderStatBox = (label, stats, timeRange) => {
             if (!stats) {
                 return `
@@ -1106,7 +1127,6 @@
                     </div>
                 `;
             }
-
             return `
                 <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;border-left:4px solid #00d4ff;">
                     <div style="color:#00d4ff;font-size:11px;font-weight:bold;">📊 ${label}</div>
@@ -1121,14 +1141,12 @@
                 </div>
             `;
         };
-
         statsPanel.innerHTML = `
             <div style="background:#0f0f1a;border-radius:8px;padding:8px;font-size:11px;color:#ddd;">
                 <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:10px;border-left:4px solid #16a085;">
                     <div style="color:#16a085;font-weight:bold;font-size:12px;">📈 DAILY & WEEKLY STATS</div>
                     <div style="color:#aaa;font-size:9px;">Only included entries (excluded entries not counted)</div>
                 </div>
-
                 ${renderStatBox('TODAY', todayStats, getTodayDate())}
                 ${renderStatBox('LAST 7 DAYS', last7DaysStats, getDateDaysAgo(6) + ' to ' + getTodayDate())}
                 ${renderStatBox('THIS WEEK', weekStats, getWeekStartDate() + ' to ' + getTodayDate())}
@@ -1140,22 +1158,18 @@
     function renderLog() {
         const logPanel = document.getElementById('aht-log-panel');
         if (!logPanel) return;
-
         const log = loadLogSafely();
         if (log.length === 0) {
             logPanel.innerHTML = '<em>No cases logged yet.</em>';
             return;
         }
-
         const excluded = loadExcludedEntries();
         const stats = calcWeightedStats(log);
         const duplicates = findDuplicateCases(log);
-
         const dagColor = (dag) => {
             const v = parseFloat(dag);
             return v >= 100 ? '#2ecc71' : v >= 80 ? '#f39c12' : '#e74c3c';
         };
-
         let duplicateWarning = '';
         if (duplicates.length > 0) {
             const totalDups = duplicates.reduce((sum, d) => sum + (d.count - 1), 0);
@@ -1166,29 +1180,24 @@
                 </div>
             `;
         }
-
         const rows = log.slice(-15).reverse().map((entry) => {
             const key = getEntryKey(entry.caseId, entry.timestamp);
             const isExcluded = excluded.includes(key);
             const typeLabel = entry.caseType === 'email' ? 'Email' : entry.caseType === 'photon' ? 'Photon' : 'Non-Email';
             const typeBg = entry.caseType === 'email' ? '#8e44ad' : entry.caseType === 'photon' ? '#c0392b' : '#2980b9';
-
             const rowStyle = isExcluded
                 ? 'border-bottom:1px solid #444;padding:4px 0;opacity:0.5;background:#0a0a14;'
                 : 'border-bottom:1px solid #222;padding:4px 0;';
-
             const excludeBtn = `
                 <button id="exclude-${entry.caseId}-${entry.timestamp}" style="background:${isExcluded ? '#27ae60' : '#e74c3c'};color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:9px;font-weight:bold;" title="Exclude this instance">
                     ${isExcluded ? '✓ Included' : '✗ Exclude'}
                 </button>
             `;
-
             const deleteBtn = `
                 <button id="delete-${entry.caseId}-${entry.timestamp}" style="background:#e74c3c;color:#fff;border:none;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:9px;font-weight:bold;margin-left:2px;" title="Delete (30s undo)">
                     🗑 Delete
                 </button>
             `;
-
             return `
                 <div style="${rowStyle}">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
@@ -1208,7 +1217,6 @@
                 </div>
             `;
         }).join('');
-
         setTimeout(() => {
             const autoDupBtn = document.getElementById('aht-btn-auto-exclude-dups');
             if (autoDupBtn) {
@@ -1219,10 +1227,8 @@
                     }
                 });
             }
-
             log.slice(-15).reverse().forEach(entry => {
                 const key = getEntryKey(entry.caseId, entry.timestamp);
-
                 const excludeBtn = document.getElementById(`exclude-${entry.caseId}-${entry.timestamp}`);
                 if (excludeBtn) {
                     excludeBtn.addEventListener('click', () => {
@@ -1230,7 +1236,6 @@
                         renderLog();
                     });
                 }
-
                 const deleteBtn = document.getElementById(`delete-${entry.caseId}-${entry.timestamp}`);
                 if (deleteBtn) {
                     deleteBtn.addEventListener('click', () => {
@@ -1246,7 +1251,6 @@
                 }
             });
         }, 100);
-
         logPanel.innerHTML = `
             <div style="background:#16213e;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px;">
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:4px;">📋 CASE LOG</div>
@@ -1256,14 +1260,11 @@
                 </div>
                 ${stats ? `<div style="color:#aaa;margin-top:4px;"><strong>Weighted DAG: <span style="color:${parseFloat(stats.weightedDAG) >= 100 ? '#2ecc71' : '#f39c12'}">${stats.weightedDAG}%</span></strong></div>` : ''}
             </div>
-
             ${duplicateWarning}
-
             <div style="background:#0f0f1a;border-radius:6px;padding:8px;margin-bottom:8px;border-left:4px solid #f39c12;">
                 <div style="font-size:10px;color:#f39c12;font-weight:bold;">✗ Exclude / ✓ Include</div>
                 <div style="font-size:9px;color:#aaa;">Click button to exclude/include this specific entry (other instances of same case kept)</div>
             </div>
-
             <div style="color:#aaa;font-size:10px;margin-bottom:4px;">Last 15 cases (most recent first):</div>
             ${rows}
         `;
@@ -1276,11 +1277,9 @@
                 alert('No cases logged yet.');
                 return;
             }
-
             const excluded = loadExcludedEntries();
             const stats = calcWeightedStats(log);
             const wb = XLSX.utils.book_new();
-
             const caseRows = log.map((entry, idx) => {
                 const key = getEntryKey(entry.caseId, entry.timestamp);
                 return {
@@ -1295,14 +1294,12 @@
                     'Excluded?': excluded.includes(key) ? 'YES' : 'NO'
                 };
             });
-
             const ws1 = XLSX.utils.json_to_sheet(caseRows);
             ws1['!cols'] = [
                 {wch:4},{wch:12},{wch:12},{wch:18},
                 {wch:12},{wch:12},{wch:10},{wch:10},{wch:10}
             ];
             XLSX.utils.book_append_sheet(wb, ws1, 'Case Log');
-
             if (stats) {
                 const summaryRows = [
                     { 'Metric': 'Export Date', 'Value': new Date().toLocaleString() },
@@ -1324,12 +1321,10 @@
                     { 'Metric': 'Weighted DAG %', 'Value': parseFloat(stats.weightedDAG) },
                     { 'Metric': 'Status', 'Value': parseFloat(stats.weightedDAG) >= 100 ? 'Achieved ✓' : 'Below Goal ✗' }
                 ];
-
                 const ws2 = XLSX.utils.json_to_sheet(summaryRows);
                 ws2['!cols'] = [{wch:35},{wch:20}];
                 XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
             }
-
             XLSX.writeFile(wb, `AHT_Log_${new Date().toISOString().slice(0,10)}.xlsx`);
             console.log('✅ Excel export successful');
             updateStatusMsg('✅ Exported to Excel', '#2ecc71');
@@ -1389,18 +1384,14 @@
         const contentArea = document.getElementById('aht-panel-content');
         const minimizeBtn = document.getElementById('aht-btn-minimize');
         const minimizedSection = document.getElementById('aht-minimized-section');
-
         if (!panel || !contentArea || !minimizeBtn || !header) return;
-
         isMinimized = !isMinimized;
         saveMinimizedState(isMinimized);
-
         if (isMinimized) {
             contentArea.style.display = 'none';
             if (minimizedSection) minimizedSection.style.display = 'flex';
             minimizeBtn.textContent = '📍 Expand';
             header.style.borderRadius = '12px 12px 12px 12px';
-
             panel.style.height = 'auto';
             panel.style.minHeight = 'auto';
         } else {
@@ -1408,7 +1399,6 @@
             if (minimizedSection) minimizedSection.style.display = 'none';
             minimizeBtn.textContent = '📌 Min';
             header.style.borderRadius = '12px 12px 0 0';
-
             panel.style.height = '';
             panel.style.minHeight = '320px';
         }
@@ -1417,7 +1407,6 @@
     function toggleGoalsEditor() {
         const goalsPanel = document.getElementById('aht-goals-editor-panel');
         if (!goalsPanel) return;
-
         if (goalsEditorOpen) {
             goalsPanel.style.display = 'none';
             goalsEditorOpen = false;
@@ -1431,7 +1420,6 @@
     function toggleStatsPanel() {
         const statsPanel = document.getElementById('aht-stats-panel');
         if (!statsPanel) return;
-
         if (statsEditorOpen) {
             statsPanel.style.display = 'none';
             statsEditorOpen = false;
@@ -1446,7 +1434,6 @@
         const emailInput = document.getElementById('aht-goal-email-input');
         const nonEmailInput = document.getElementById('aht-goal-nonemail-input');
         const photonInput = document.getElementById('aht-goal-photon-input');
-
         if (emailInput) emailInput.value = (AHT_GOALS.email / 60).toFixed(2);
         if (nonEmailInput) nonEmailInput.value = (AHT_GOALS.nonemail / 60).toFixed(2);
         if (photonInput) photonInput.value = (AHT_GOALS.photon / 60).toFixed(2);
@@ -1457,7 +1444,6 @@
             const emailVal = parseFloat(document.getElementById('aht-goal-email-input').value);
             const nonEmailVal = parseFloat(document.getElementById('aht-goal-nonemail-input').value);
             const photonVal = parseFloat(document.getElementById('aht-goal-photon-input').value);
-
             if (isNaN(emailVal) || emailVal <= 0 || emailVal > 60) {
                 alert('⚠️ Email goal must be 0.1-60 minutes');
                 return false;
@@ -1470,15 +1456,12 @@
                 alert('⚠️ Photon goal must be 0.1-60 minutes');
                 return false;
             }
-
             AHT_GOALS.email = emailVal * 60;
             AHT_GOALS.nonemail = nonEmailVal * 60;
             AHT_GOALS.photon = photonVal * 60;
-
             saveGoals();
             updateCaseTypeUI();
             updateStatusMsg('✅ Goals saved!', '#2ecc71');
-
             return true;
         } catch (e) {
             console.error('❌ Error saving goals:', e);
@@ -1489,84 +1472,80 @@
     function displayHelpInstructions() {
         const helpPanel = document.getElementById('aht-help-panel');
         const helpBtn = document.getElementById('aht-btn-help');
-
         if (!helpPanel || !helpBtn) return;
-
         if (helpPanelOpen) {
             helpPanel.style.display = 'none';
             helpPanelOpen = false;
             helpBtn.style.opacity = '1';
             return;
         }
-
         helpPanelOpen = true;
         helpBtn.style.opacity = '0.7';
-
         helpPanel.innerHTML = `
             <div style="background:#16213e;border-radius:6px;padding:10px;margin-bottom:10px;border-left:4px solid #16a085;">
-                <div style="color:#16a085;font-weight:bold;font-size:12px;">📖 AHT TRACKER v3.3.5 GUIDE</div>
+                <div style="color:#16a085;font-weight:bold;font-size:12px;">📖 AHT TRACKER v3.3.14 GUIDE</div>
             </div>
-
             <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;">⭐ VIEW-CASE & ENTITY SUPPORT (v3.3.5)</div>
+                <div style="color:#00d4ff;font-weight:bold;">⭐ WORKS IN LOBBY</div>
                 <div style="color:#bbb;font-size:10px;">
-                    • Works on both /hz/entity AND /hz/view-case URLs<br>
-                    • Automatically detects case IDs from URL params<br>
-                    • Supports Photon/UnitOfWork cases<br>
-                    • Console logs show detection status
+                    • App now appears in Paragon lobby<br>
+                    • BUT won't log/track without a valid Case ID<br>
+                    • Case ID detection fails in lobby (by design)<br>
+                    • Badge shows "❌ Invalid" in lobby
                 </div>
             </div>
-
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">⭐ CASE CLOSURE LOGGING</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Cases ARE logged when closed without clicking STOP<br>
+                    • Cases are NOT logged on page refresh (same case)<br>
+                    • Timer resumes on refresh if same case<br>
+                    • Different case = previous case logged + new timer starts
+                </div>
+            </div>
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">⭐ CASE ID VALIDATION</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Script validates Case ID detection<br>
+                    • If Case ID cannot be detected = NO timer<br>
+                    • Badge shows "❌ Invalid" when detection fails<br>
+                    • No log entries without valid Case ID
+                </div>
+            </div>
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">⭐ NO DUPLICATE ON REFRESH</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Refresh the page = NO duplicate entry<br>
+                    • Timer resumes from where it stopped<br>
+                    • Only logs when you click STOP or change case<br>
+                    • Each case = one entry per session
+                </div>
+            </div>
+            <div style="margin-bottom:12px;">
+                <div style="color:#00d4ff;font-weight:bold;">⭐ TIMER RESUME ON SAME CASE</div>
+                <div style="color:#bbb;font-size:10px;">
+                    • Page refresh? Timer continues if same case!<br>
+                    • Different case = timer resets<br>
+                    • Case ID comparison is normalized
+                </div>
+            </div>
             <div style="margin-bottom:12px;">
                 <div style="color:#00d4ff;font-weight:bold;">⭐ MINIMIZE PANEL</div>
                 <div style="color:#bbb;font-size:10px;">
-                    • Click <strong>📌 Min</strong> to minimize to header only<br>
-                    • Timer still visible in minimized mode<br>
-                    • Click <strong>📍 Expand</strong> to restore full panel<br>
-                    • Perfect for keeping track while working
+                    • Click <strong>📌 Min</strong> to minimize<br>
+                    • Timer visible in minimized mode<br>
+                    • Click <strong>📍 Expand</strong> to restore
                 </div>
             </div>
-
-            <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;">⭐ EXCLUDE SPECIFIC ENTRIES</div>
-                <div style="color:#bbb;font-size:10px;">
-                    • Each case instance is tracked separately<br>
-                    • Click <strong>✗ Exclude</strong> to exclude ONLY that instance<br>
-                    • Other instances of same case still count<br>
-                    • Click <strong>✓ Include</strong> to add back
-                </div>
-            </div>
-
-            <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;">🚫 AUTO-EXCLUDE DUPLICATES</div>
-                <div style="color:#bbb;font-size:10px;">
-                    • If you see duplicate warning<br>
-                    • Click <strong>🔄 Auto-Exclude Dups</strong><br>
-                    • Keeps first instance, excludes rest<br>
-                    • Save time for accidental re-opens
-                </div>
-            </div>
-
-            <div style="margin-bottom:12px;">
-                <div style="color:#00d4ff;font-weight:bold;">📊 DAILY STATS</div>
-                <div style="color:#bbb;font-size:10px;">
-                    • Click <strong>📊 Stats</strong> button<br>
-                    • See Today, Last 7 Days, Week, Month<br>
-                    • Only included entries counted<br>
-                    • Auto-updates in real-time
-                </div>
-            </div>
-
             <div style="background:#16213e;border-radius:6px;padding:8px;border-left:4px solid #2980b9;margin-top:10px;">
                 <div style="color:#2980b9;font-size:10px;"><strong>💡 TIP:</strong> Check browser console for detailed detection logs!</div>
             </div>
         `;
-
         helpPanel.style.display = 'block';
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // 🖼️ BUILD MAIN PANEL (RESPONSIVE + PROPER MINIMIZE)
+    // 🖼️ BUILD MAIN PANEL
     // ═════════════════════════════════════════════════════════════════════════
 
     function buildPanel() {
@@ -1574,10 +1553,9 @@
         if (existing && document.body?.contains(existing)) return;
         if (existing) existing.remove();
         if (!document.body) return;
-
         const { position, size } = loadPanelState();
         isMinimized = loadMinimizedState();
-
+        const caseIdDisplay = isCaseIdValid ? currentCaseId : '❌ NOT DETECTED';
         const panel = document.createElement('div');
         panel.id = 'aht-tracker-panel';
         panel.style.cssText = `
@@ -1591,7 +1569,6 @@
             border:1px solid #333;
             transition:all 0.3s ease;
         `;
-
         panel.innerHTML = `
             <div id="aht-panel-header" style="
                 display:flex;
@@ -1605,7 +1582,7 @@
                 border-radius:12px 12px 0 0;
                 ${isMinimized ? 'border-radius:12px 12px 12px 12px;' : ''}
             ">
-                <strong style="font-size:14px;white-space:nowrap;">⏱ AHT v3.3.5</strong>
+                <strong style="font-size:14px;white-space:nowrap;">⏱ AHT v3.3.14</strong>
                 <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
                     <span id="aht-case-type-badge" style="
                         font-size:10px;
@@ -1628,8 +1605,6 @@
                     " title="Minimize/Expand panel">📌 Min</button>
                 </div>
             </div>
-
-            <!-- MINIMIZED DISPLAY (Only shows when minimized) -->
             <div id="aht-minimized-section" style="
                 display:${isMinimized ? 'flex' : 'none'};
                 flex-direction:column;
@@ -1651,7 +1626,6 @@
                     text-align:center;
                 ">Click expand to view details</div>
             </div>
-
             <div id="aht-panel-content" style="
                 padding:12px 14px;
                 overflow-y:auto;
@@ -1661,413 +1635,66 @@
                 flex-direction:column;
                 gap:8px;
             ">
-                <!-- Case Info Section -->
-                <div style="
-                    display:grid;
-                    grid-template-columns:1fr;
-                    gap:2px;
-                    font-size:9px;
-                ">
-                    <div id="aht-case-label" style="
-                        color:#aaa;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                        white-space:nowrap;
-                    ">Case: ${currentCaseId}</div>
-                    <div id="aht-queue-label" style="
-                        color:#888;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                        white-space:nowrap;
-                    ">Queue: detecting...</div>
+                <div style="display:grid;grid-template-columns:1fr;gap:2px;font-size:9px;">
+                    <div id="aht-case-label" style="color:${isCaseIdValid ? '#aaa' : '#e74c3c'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:${isCaseIdValid ? 'normal' : 'bold'};">Case: ${caseIdDisplay}</div>
+                    <div id="aht-queue-label" style="color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Queue: detecting...</div>
                 </div>
-
-                <!-- Timer Section -->
-                <div style="
-                    display:grid;
-                    grid-template-columns:1fr;
-                    gap:6px;
-                    text-align:center;
-                    padding:4px 0;
-                    border:1px solid #333;
-                    border-radius:6px;
-                    background:#0f0f1a;
-                ">
-                    <div id="aht-timer-display" style="
-                        font-size:clamp(28px, 8vw, 36px);
-                        font-weight:bold;
-                        letter-spacing:3px;
-                        color:#00d4ff;
-                        line-height:1;
-                        margin:8px 0 2px 0;
-                    ">00:00</div>
-                    <div id="aht-goal-label" style="
-                        font-size:10px;
-                        color:#888;
-                        margin:0 0 4px 0;
-                    ">Goal: 8:00</div>
-                    <div id="aht-status-bar" style="
-                        height:6px;
-                        border-radius:4px;
-                        background:#00d4ff;
-                        width:0%;
-                        transition:width 0.5s;
-                        margin:0 8px 8px 8px;
-                    "></div>
-                    <div id="aht-dag-display" style="
-                        font-size:11px;
-                        color:#aaa;
-                        margin:0 0 6px 0;
-                    ">DAG: —</div>
+                <div style="display:grid;grid-template-columns:1fr;gap:6px;text-align:center;padding:4px 0;border:1px solid #333;border-radius:6px;background:#0f0f1a;">
+                    <div id="aht-timer-display" style="font-size:clamp(28px, 8vw, 36px);font-weight:bold;letter-spacing:3px;color:#00d4ff;line-height:1;margin:8px 0 2px 0;">00:00</div>
+                    <div id="aht-goal-label" style="font-size:10px;color:#888;margin:0 0 4px 0;">Goal: 8:00</div>
+                    <div id="aht-status-bar" style="height:6px;border-radius:4px;background:#00d4ff;width:0%;transition:width 0.5s;margin:0 8px 8px 8px;"></div>
+                    <div id="aht-dag-display" style="font-size:11px;color:#aaa;margin:0 0 6px 0;">DAG: —</div>
                 </div>
-
-                <!-- Status Message -->
-                <div id="aht-status-msg" style="
-                    text-align:center;
-                    font-size:10px;
-                    color:#aaa;
-                    padding:4px;
-                    border-radius:4px;
-                    background:#16213e;
-                    min-height:18px;
-                ">🚀 Loading...</div>
-
-                <!-- Stop Button (Full Width) -->
+                <div id="aht-status-msg" style="text-align:center;font-size:10px;color:${isCaseIdValid ? '#aaa' : '#e74c3c'};padding:4px;border-radius:4px;background:#16213e;min-height:18px;font-weight:${isCaseIdValid ? 'normal' : 'bold'};">${isCaseIdValid ? '🚀 Loading...' : '❌ Case ID Not Detected'}</div>
                 <div style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:2px;">
-                    <button id="aht-btn-stop" style="
-                        background:#e74c3c;
-                        color:#fff;
-                        border:none;
-                        border-radius:6px;
-                        padding:10px 8px;
-                        cursor:pointer;
-                        font-size:12px;
-                        font-weight:bold;
-                        transition:background 0.3s;
-                        width:100%;
-                        box-sizing:border-box;
-                    " disabled title="Stop timer and save case">⏹ STOP</button>
+                    <button id="aht-btn-stop" style="background:#e74c3c;color:#fff;border:none;border-radius:6px;padding:10px 8px;cursor:pointer;font-size:12px;font-weight:bold;transition:background 0.3s;width:100%;box-sizing:border-box;" ${isCaseIdValid ? '' : 'disabled'} title="Stop timer and save case">⏹ STOP</button>
                 </div>
-
-                <!-- Case Type Override Buttons (3-column grid) -->
-                <div style="
-                    display:grid;
-                    grid-template-columns:repeat(3, 1fr);
-                    gap:5px;
-                    margin-top:2px;
-                ">
-                    <button id="aht-btn-override-email" style="
-                        background:#8e44ad;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="Force mark as Email">📧 Email</button>
-                    <button id="aht-btn-override-nonemail" style="
-                        background:#2c3e50;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="Force mark as Non-Email">📁 Non-Email</button>
-                    <button id="aht-btn-override-photon" style="
-                        background:#c0392b;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="Force mark as Photon">⚛ Photon</button>
+                <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:5px;margin-top:2px;">
+                    <button id="aht-btn-override-email" style="background:#8e44ad;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="Force mark as Email">📧 Email</button>
+                    <button id="aht-btn-override-nonemail" style="background:#2c3e50;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="Force mark as Non-Email">📁 Non-Email</button>
+                    <button id="aht-btn-override-photon" style="background:#c0392b;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="Force mark as Photon">⚛ Photon</button>
                 </div>
-
-                <!-- Undo Button (Conditional) -->
                 <div style="display:grid;grid-template-columns:1fr;gap:6px;">
-                    <button id="aht-btn-undo" style="
-                        background:#f1c40f;
-                        color:#000;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 8px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        display:none;
-                    " title="Undo last delete (30 seconds)">↶ UNDO</button>
+                    <button id="aht-btn-undo" style="background:#f1c40f;color:#000;border:none;border-radius:5px;padding:6px 8px;cursor:pointer;font-size:10px;font-weight:bold;display:none;" title="Undo last delete (30 seconds)">↶ UNDO</button>
                 </div>
-
-                <!-- Primary Action Buttons (3-column grid) -->
-                <div style="
-                    display:grid;
-                    grid-template-columns:repeat(3, 1fr);
-                    gap:5px;
-                    margin-top:2px;
-                ">
-                    <button id="aht-btn-log" style="
-                        background:#2980b9;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="View case log">📋 Log</button>
-                    <button id="aht-btn-stats" style="
-                        background:#16a085;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="View daily/weekly stats">📊 Stats</button>
-                    <button id="aht-btn-help" style="
-                        background:#27ae60;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="Show help guide">❓ Help</button>
+                <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:5px;margin-top:2px;">
+                    <button id="aht-btn-log" style="background:#2980b9;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="View case log">📋 Log</button>
+                    <button id="aht-btn-stats" style="background:#16a085;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="View daily/weekly stats">📊 Stats</button>
+                    <button id="aht-btn-help" style="background:#27ae60;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="Show help guide">❓ Help</button>
                 </div>
-
-                <!-- Secondary Action Buttons (3-column grid) -->
-                <div style="
-                    display:grid;
-                    grid-template-columns:repeat(3, 1fr);
-                    gap:5px;
-                ">
-                    <button id="aht-btn-edit-goals" style="
-                        background:#f39c12;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="Edit AHT goals">⚙️ Goals</button>
-                    <button id="aht-btn-clear" style="
-                        background:#7f8c8d;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="Clear all logs">🗑 Clear</button>
-                    <button id="aht-btn-export" style="
-                        background:#27ae60;
-                        color:#fff;
-                        border:none;
-                        border-radius:5px;
-                        padding:6px 4px;
-                        cursor:pointer;
-                        font-size:10px;
-                        font-weight:bold;
-                        white-space:nowrap;
-                        overflow:hidden;
-                        text-overflow:ellipsis;
-                    " title="Export to Excel">📥 Export</button>
+                <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:5px;">
+                    <button id="aht-btn-edit-goals" style="background:#f39c12;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="Edit AHT goals">⚙️ Goals</button>
+                    <button id="aht-btn-clear" style="background:#7f8c8d;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="Clear all logs">🗑 Clear</button>
+                    <button id="aht-btn-export" style="background:#27ae60;color:#fff;border:none;border-radius:5px;padding:6px 4px;cursor:pointer;font-size:10px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="Export to Excel">📥 Export</button>
                 </div>
-
-                <!-- Stats Panel -->
-                <div id="aht-stats-panel" style="
-                    display:none;
-                    max-height:300px;
-                    overflow-y:auto;
-                    background:#0f0f1a;
-                    border-radius:6px;
-                    padding:8px;
-                    font-size:10px;
-                    border:1px solid #333;
-                    margin-top:6px;
-                "></div>
-
-                <!-- Goals Editor -->
-                <div id="aht-goals-editor-panel" style="
-                    display:none;
-                    background:#0f0f1a;
-                    border-radius:6px;
-                    padding:10px;
-                    border:2px solid #f39c12;
-                    margin-top:6px;
-                ">
-                    <div style="
-                        color:#f39c12;
-                        font-weight:bold;
-                        font-size:11px;
-                        margin-bottom:8px;
-                    ">⚙️ EDIT GOALS</div>
+                <div id="aht-stats-panel" style="display:none;max-height:300px;overflow-y:auto;background:#0f0f1a;border-radius:6px;padding:8px;font-size:10px;border:1px solid #333;margin-top:6px;"></div>
+                <div id="aht-goals-editor-panel" style="display:none;background:#0f0f1a;border-radius:6px;padding:10px;border:2px solid #f39c12;margin-top:6px;">
+                    <div style="color:#f39c12;font-weight:bold;font-size:11px;margin-bottom:8px;">⚙️ EDIT GOALS</div>
                     <div style="display:grid;grid-template-columns:1fr;gap:8px;">
                         <div>
-                            <label style="
-                                color:#00d4ff;
-                                font-size:9px;
-                                display:block;
-                                margin-bottom:3px;
-                                font-weight:bold;
-                            ">Email (min):</label>
-                            <input id="aht-goal-email-input" type="number" step="0.1" min="0.1" max="60" style="
-                                width:100%;
-                                padding:5px;
-                                border:1px solid #444;
-                                border-radius:4px;
-                                background:#1a1a2e;
-                                color:#00d4ff;
-                                font-size:10px;
-                                box-sizing:border-box;
-                            "/>
+                            <label style="color:#00d4ff;font-size:9px;display:block;margin-bottom:3px;font-weight:bold;">Email (min):</label>
+                            <input id="aht-goal-email-input" type="number" step="0.1" min="0.1" max="60" style="width:100%;padding:5px;border:1px solid #444;border-radius:4px;background:#1a1a2e;color:#00d4ff;font-size:10px;box-sizing:border-box;"/>
                         </div>
                         <div>
-                            <label style="
-                                color:#2980b9;
-                                font-size:9px;
-                                display:block;
-                                margin-bottom:3px;
-                                font-weight:bold;
-                            ">Non-Email (min):</label>
-                            <input id="aht-goal-nonemail-input" type="number" step="0.1" min="0.1" max="60" style="
-                                width:100%;
-                                padding:5px;
-                                border:1px solid #444;
-                                border-radius:4px;
-                                background:#1a1a2e;
-                                color:#2980b9;
-                                font-size:10px;
-                                box-sizing:border-box;
-                            "/>
+                            <label style="color:#2980b9;font-size:9px;display:block;margin-bottom:3px;font-weight:bold;">Non-Email (min):</label>
+                            <input id="aht-goal-nonemail-input" type="number" step="0.1" min="0.1" max="60" style="width:100%;padding:5px;border:1px solid #444;border-radius:4px;background:#1a1a2e;color:#2980b9;font-size:10px;box-sizing:border-box;"/>
                         </div>
                         <div>
-                            <label style="
-                                color:#c0392b;
-                                font-size:9px;
-                                display:block;
-                                margin-bottom:3px;
-                                font-weight:bold;
-                            ">Photon (min):</label>
-                            <input id="aht-goal-photon-input" type="number" step="0.1" min="0.1" max="60" style="
-                                width:100%;
-                                padding:5px;
-                                border:1px solid #444;
-                                border-radius:4px;
-                                background:#1a1a2e;
-                                color:#c0392b;
-                                font-size:10px;
-                                box-sizing:border-box;
-                            "/>
+                            <label style="color:#c0392b;font-size:9px;display:block;margin-bottom:3px;font-weight:bold;">Photon (min):</label>
+                            <input id="aht-goal-photon-input" type="number" step="0.1" min="0.1" max="60" style="width:100%;padding:5px;border:1px solid #444;border-radius:4px;background:#1a1a2e;color:#c0392b;font-size:10px;box-sizing:border-box;"/>
                         </div>
                     </div>
-                    <div style="
-                        display:grid;
-                        grid-template-columns:1fr 1fr;
-                        gap:5px;
-                        margin-top:8px;
-                    ">
-                        <button id="aht-btn-save-goals" style="
-                            background:#27ae60;
-                            color:#fff;
-                            border:none;
-                            border-radius:4px;
-                            padding:8px;
-                            cursor:pointer;
-                            font-size:10px;
-                            font-weight:bold;
-                        " title="Save custom goals">💾 Save</button>
-                        <button id="aht-btn-reset-goals" style="
-                            background:#e74c3c;
-                            color:#fff;
-                            border:none;
-                            border-radius:4px;
-                            padding:8px;
-                            cursor:pointer;
-                            font-size:10px;
-                            font-weight:bold;
-                        " title="Reset to default goals">🔄 Reset</button>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:8px;">
+                        <button id="aht-btn-save-goals" style="background:#27ae60;color:#fff;border:none;border-radius:4px;padding:8px;cursor:pointer;font-size:10px;font-weight:bold;" title="Save custom goals">💾 Save</button>
+                        <button id="aht-btn-reset-goals" style="background:#e74c3c;color:#fff;border:none;border-radius:4px;padding:8px;cursor:pointer;font-size:10px;font-weight:bold;" title="Reset to default goals">🔄 Reset</button>
                     </div>
                 </div>
-
-                <!-- Log Panel -->
-                <div id="aht-log-panel" style="
-                    display:none;
-                    max-height:300px;
-                    overflow-y:auto;
-                    background:#0f0f1a;
-                    border-radius:6px;
-                    padding:8px;
-                    font-size:10px;
-                    border:1px solid #333;
-                    margin-top:6px;
-                "></div>
-
-                <!-- Help Panel -->
-                <div id="aht-help-panel" style="
-                    display:none;
-                    max-height:300px;
-                    overflow-y:auto;
-                    background:#0f0f1a;
-                    border-radius:6px;
-                    padding:10px;
-                    font-size:10px;
-                    line-height:1.5;
-                    border:1px solid #333;
-                    margin-top:6px;
-                "></div>
+                <div id="aht-log-panel" style="display:none;max-height:300px;overflow-y:auto;background:#0f0f1a;border-radius:6px;padding:8px;font-size:10px;border:1px solid #333;margin-top:6px;"></div>
+                <div id="aht-help-panel" style="display:none;max-height:300px;overflow-y:auto;background:#0f0f1a;border-radius:6px;padding:10px;font-size:10px;line-height:1.5;border:1px solid #333;margin-top:6px;"></div>
             </div>
-
-            <div id="aht-resize-handle" style="
-                position:absolute;
-                bottom:0;
-                right:0;
-                width:14px;
-                height:14px;
-                cursor:nwse-resize;
-                background:linear-gradient(135deg, transparent 50%, #00d4ff 50%);
-                border-radius:0 0 12px 0;
-                opacity:0.3;
-                flex-shrink:0;
-                display:${isMinimized ? 'none' : 'block'};
-            "></div>
+            <div id="aht-resize-handle" style="position:absolute;bottom:0;right:0;width:14px;height:14px;cursor:nwse-resize;background:linear-gradient(135deg, transparent 50%, #00d4ff 50%);border-radius:0 0 12px 0;opacity:0.3;flex-shrink:0;display:${isMinimized ? 'none' : 'block'};"></div>
         `;
-
         document.body.appendChild(panel);
-
         const style = document.createElement('style');
         style.textContent = `
             @keyframes pulse {
@@ -2099,7 +1726,6 @@
             }
         `;
         document.head.appendChild(style);
-
         setTimeout(() => {
             cacheDOMElements();
             attachEvents();
@@ -2107,8 +1733,7 @@
             refreshCaseType();
             updateDisplay();
         }, 100);
-
-        console.log('✅ Panel built (v3.3.5 - View-Case URL support)');
+        console.log('✅ Panel built (v3.3.14 - Compensation Active)');
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2119,28 +1744,23 @@
         const panel = document.getElementById('aht-tracker-panel');
         const header = document.getElementById('aht-panel-header');
         const resizeHandle = document.getElementById('aht-resize-handle');
-
         if (!panel || !header) return;
-
         const onMouseDown = (e) => {
             if (e.target.id === 'aht-btn-minimize') return;
             isDragging = true;
             dragOffsetX = e.clientX - panel.getBoundingClientRect().left;
             dragOffsetY = e.clientY - panel.getBoundingClientRect().top;
         };
-
         const onMouseMove = (e) => {
             if (isDragging) {
                 const rect = panel.getBoundingClientRect();
                 const maxX = window.innerWidth - rect.width;
                 const maxY = window.innerHeight - rect.height;
-
                 panel.style.left = Math.max(0, Math.min(e.clientX - dragOffsetX, maxX)) + 'px';
                 panel.style.top = Math.max(0, Math.min(e.clientY - dragOffsetY, maxY)) + 'px';
                 panel.style.bottom = 'auto';
                 panel.style.right = 'auto';
             }
-
             if (isResizing) {
                 const newWidth = Math.max(240, resizeStartWidth + (e.clientX - resizeStartX));
                 const newHeight = Math.max(320, resizeStartHeight + (e.clientY - resizeStartY));
@@ -2148,7 +1768,6 @@
                 panel.style.height = newHeight + 'px';
             }
         };
-
         const onMouseUp = () => {
             if (isDragging || isResizing) {
                 isDragging = false;
@@ -2156,11 +1775,9 @@
                 savePanelState(panel);
             }
         };
-
         header.addEventListener('mousedown', onMouseDown);
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
-
         if (resizeHandle) {
             resizeHandle.addEventListener('mousedown', (e) => {
                 e.preventDefault();
@@ -2172,7 +1789,6 @@
                 resizeStartHeight = rect.height;
             });
         }
-
         registerCleanup(() => {
             header.removeEventListener('mousedown', onMouseDown);
             document.removeEventListener('mousemove', onMouseMove);
@@ -2233,7 +1849,6 @@
             }],
             ['aht-btn-export', 'click', exportToExcel]
         ];
-
         handlers.forEach(([id, event, handler]) => {
             const el = document.getElementById(id);
             if (el) {
@@ -2241,7 +1856,6 @@
                 el.addEventListener(event, handler);
             }
         });
-
         console.log('✅ Events attached');
     }
 
@@ -2254,7 +1868,6 @@
             mutationObserver.disconnect();
             mutationObserver = null;
         }
-
         mutationObserver = new MutationObserver(() => {
             try {
                 if (!document.getElementById('aht-tracker-panel')) {
@@ -2265,25 +1878,42 @@
                         }
                     }, CONFIG.timers.panelRebuild);
                 }
-
                 const newUrl = location.href;
                 if (newUrl !== lastUrl) {
                     if (urlCheckTimeout) clearTimeout(urlCheckTimeout);
                     urlCheckTimeout = setTimeout(() => {
                         lastUrl = newUrl;
                         const newCaseId = detectCaseId();
-
-                        if (newCaseId !== manuallyStoppedOnCase && !isRunning) {
+                        const newCaseIdValid = isValidCaseId(newCaseId);
+                        const isSameCase = newCaseIdValid && isCaseIdValid && normalizeAndCompareCaseIds(newCaseId, currentCaseId);
+                        if (isSameCase) {
+                            console.log(`✅ Same case detected: ${newCaseId}`);
+                            refreshCaseType();
+                            if (!isRunning) {
+                                startTimer();
+                            }
+                        } else if (!isRunning || (newCaseIdValid && newCaseId !== manuallyStoppedOnCase)) {
+                            if (elapsedSeconds > 0 && isCaseIdValid) {
+                                const dag = calcDAG(elapsedSeconds, currentCaseType);
+                                saveLog(dag);
+                                lastSavedCaseId = currentCaseId;
+                                console.log(`✅ Saved previous case [${currentCaseId}] ${formatTime(elapsedSeconds)} before switching`);
+                            }
+                            console.log(`📍 Case changed: ${currentCaseId} → ${newCaseId}`);
                             currentCaseId = newCaseId;
+                            isCaseIdValid = newCaseIdValid;
                             elapsedSeconds = 0;
                             if (DOM.display) DOM.display.textContent = '00:00';
                             if (DOM.dag) DOM.dag.textContent = 'DAG: —';
-                            updateStatusMsg('🚀 New case!', '#aaa');
-
+                            updateStatusMsg(isCaseIdValid ? '🚀 New case!' : '❌ Case ID Not Detected', isCaseIdValid ? '#aaa' : '#e74c3c');
                             setTimeout(() => {
                                 manuallyStoppedOnCase = null;
                                 refreshCaseType();
-                                startTimer();
+                                if (isCaseIdValid) {
+                                    startTimer();
+                                } else {
+                                    setButtonStates(false);
+                                }
                             }, CONFIG.timers.caseChangeDelay);
                         }
                     }, 300);
@@ -2292,12 +1922,10 @@
                 console.error('❌ Observer error:', e);
             }
         });
-
         mutationObserver.observe(document, {
             subtree: false,
             childList: true
         });
-
         registerCleanup(() => {
             if (mutationObserver) {
                 mutationObserver.disconnect();
@@ -2311,21 +1939,17 @@
     // ═════════════════════════════════════════════════════════════════════════
 
     function setupPageUnloadHandler() {
-        const saveOnUnload = () => {
-            if (isRunning && elapsedSeconds > 0) {
-                const dag = calcDAG(elapsedSeconds, currentCaseType);
-                saveLog(dag);
-            }
+        const onBeforeUnload = () => {
+            saveUnloadState();
         };
-
-        window.addEventListener('beforeunload', saveOnUnload);
+        window.addEventListener('beforeunload', onBeforeUnload);
         registerCleanup(() => {
-            window.removeEventListener('beforeunload', saveOnUnload);
+            window.removeEventListener('beforeunload', onBeforeUnload);
         });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // 🎯 INITIALIZATION
+    // 🎯 INITIALIZATION (v3.3.14 - COMPENSATION ACTIVE)
     // ═════════════════════════════════════════════════════════════════════════
 
     function initialize() {
@@ -2333,19 +1957,16 @@
             setTimeout(initialize, 200);
             return;
         }
-
         console.log('═══════════════════════════════════════════════════════');
-        console.log('  ✨ Initializing AHT Tracker v3.3.5 - VIEW-CASE SUPPORT');
+        console.log('  ✨ Initializing AHT Tracker v3.3.14 - COMPENSATION');
         console.log('═══════════════════════════════════════════════════════');
-
         loadGoals();
+        restoreAndLogUnloadState();
         const timerRestored = restoreTimerState();
-
         buildPanel();
         setupPageUnloadHandler();
         setupMutationObserver();
-
-        if (timerRestored && isRunning) {
+        if (timerRestored && isRunning && isCaseIdValid) {
             setTimeout(() => {
                 timerInterval = setInterval(() => {
                     try {
@@ -2356,13 +1977,12 @@
                         console.error('❌ Timer error:', e);
                     }
                 }, CONFIG.timers.updateFrequency);
-
                 setButtonStates(true);
                 updateDisplay();
                 updateStatusMsg('🟢 Resumed', '#2ecc71');
                 pageLoadInitialized = true;
             }, 500);
-        } else if (shouldAutoStartOnLoad && !pageLoadInitialized) {
+        } else if (shouldAutoStartOnLoad && !pageLoadInitialized && isCaseIdValid) {
             setTimeout(() => {
                 startTimer();
                 pageLoadInitialized = true;
@@ -2370,9 +1990,8 @@
         } else {
             pageLoadInitialized = true;
         }
-
         console.log('═══════════════════════════════════════════════════════');
-        console.log('  🎉 AHT Tracker v3.3.5 Ready!');
+        console.log('  🎉 AHT Tracker v3.3.14 Ready!');
         console.log('═══════════════════════════════════════════════════════');
     }
 
